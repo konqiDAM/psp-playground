@@ -17,6 +17,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install host build tools
+        run: apt-get update && apt-get install -y build-essential python3
+
       - name: Host tests
         run: ./scripts/test.sh
 
