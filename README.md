@@ -48,7 +48,7 @@ PSP-1000 / universal (24 MB) build.
 Verify no `*ForKernel` imports leaked into the ELF:
 
 ```sh
-/home/agent/pspdev/bin/psp-readelf -x .rodata.sceResident build/psp/psp_snake
+psp-readelf -x .rodata.sceResident build/psp/psp_snake
 ```
 
 ## Install on a real PSP

@@ -338,8 +338,8 @@ plan gate, independent review and integration.
    ```
 3. **Verify that the ELF does NOT import `*ForKernel` libraries (mandatory):**
    ```sh
-   /home/agent/pspdev/bin/psp-readelf -x .rodata.sceResident build/psp/psp_snake
-/home/agent/pspdev/bin/psp-readelf -x .rodata.sceResident build/psp/wifi/psp_wifi_app
+   psp-readelf -x .rodata.sceResident build/psp/psp_snake
+psp-readelf -x .rodata.sceResident build/psp/wifi/psp_wifi_app
    ```
    The text output must contain **only** user libraries (`ThreadManForUser`,
    `IoFileMgrForUser`, `LoadExecForUser`, `SysMemUserForUser`, `StdioForUser`,

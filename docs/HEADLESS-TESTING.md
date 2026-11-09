@@ -10,7 +10,7 @@ performance measurement.
 The binary used here is built from PPSSPP master at:
 
 ```text
-/home/agent/ppsspp/build/PPSSPPHeadless
+$PPSSPP_HEADLESS (default: build/ppsspp/PPSSPPHeadless)
 ```
 
 Build recipe (Linux x86-64, tested with GCC 14 and CMake 3.31):
