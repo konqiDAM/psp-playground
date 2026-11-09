@@ -85,9 +85,22 @@ jobs:
           name: eboots
           path: eboots
 
+      - name: Rename EBOOTs for release
+        run: |
+          mkdir -p release
+          cp eboots/build/psp/EBOOT.PBP release/snake-EBOOT.PBP
+          cp eboots/build/psp/cube3d/EBOOT.PBP release/cube3d-EBOOT.PBP
+          cp eboots/build/psp/racing/EBOOT.PBP release/racing-EBOOT.PBP
+          cp eboots/build/psp/memtest/EBOOT.PBP release/memtest-EBOOT.PBP
+          cp eboots/build/psp/screen/EBOOT.PBP release/screen-EBOOT.PBP
+          cp eboots/build/psp/pong/EBOOT.PBP release/pong-EBOOT.PBP
+          cp eboots/build/psp/wifi-test/EBOOT.PBP release/wifi-test-EBOOT.PBP
+          cp eboots/build/psp/wifi/EBOOT.PBP release/wifi-EBOOT.PBP
+          ls -l release/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            eboots/**/*.PBP
+            release/*-EBOOT.PBP
           generate_release_notes: true
