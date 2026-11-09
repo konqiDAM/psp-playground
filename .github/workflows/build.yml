@@ -88,14 +88,21 @@ jobs:
       - name: Rename EBOOTs for release
         run: |
           mkdir -p release
-          cp eboots/build/psp/EBOOT.PBP release/snake-EBOOT.PBP
-          cp eboots/build/psp/cube3d/EBOOT.PBP release/cube3d-EBOOT.PBP
-          cp eboots/build/psp/racing/EBOOT.PBP release/racing-EBOOT.PBP
-          cp eboots/build/psp/memtest/EBOOT.PBP release/memtest-EBOOT.PBP
-          cp eboots/build/psp/screen/EBOOT.PBP release/screen-EBOOT.PBP
-          cp eboots/build/psp/pong/EBOOT.PBP release/pong-EBOOT.PBP
-          cp eboots/build/psp/wifi-test/EBOOT.PBP release/wifi-test-EBOOT.PBP
-          cp eboots/build/psp/wifi/EBOOT.PBP release/wifi-EBOOT.PBP
+          find eboots -name 'EBOOT.PBP' -print
+          # Map each EBOOT to its app name based on directory
+          for f in $(find eboots -name 'EBOOT.PBP' | sort); do
+            case "$f" in
+              */cube3d/*)  name=cube3d ;;
+              */racing/*)  name=racing ;;
+              */memtest/*) name=memtest ;;
+              */screen/*)  name=screen ;;
+              */pong/*)    name=pong ;;
+              */wifi-test/*) name=wifi-test ;;
+              */wifi/*)    name=wifi ;;
+              *)           name=snake ;;
+            esac
+            cp "$f" "release/${name}-EBOOT.PBP"
+          done
           ls -l release/
 
       - name: Create GitHub Release
