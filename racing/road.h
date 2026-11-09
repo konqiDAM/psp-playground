@@ -1,0 +1,174 @@
+/*
+ * road.h - runtime-generated curved road for Racing 3D.
+ *
+ * The road is an arc-spline chain described in (s, lateral) coordinates:
+ * s is the distance along the centreline and heading 0 points along +Z.
+ * road_sample() is the single source of truth for physics and rendering.
+ */
+
+#ifndef RACING_ROAD_H
+#define RACING_ROAD_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#define ROAD_HALF_WIDTH 5.0f      /* flat/default test asphalt half-width */
+#define ROAD_LANES 2
+#define ROAD_SHOULDER_WIDTH 4.5f  /* drivable tan strip on each side */
+#define ROAD_EDGE_X (ROAD_HALF_WIDTH + ROAD_SHOULDER_WIDTH) /* 9.5 */
+
+#define ROAD_NORMAL_TOTAL 10.0f
+#define ROAD_WIDE_TOTAL 16.0f
+#define ROAD_WIDE_FLAT 500.0f
+#define ROAD_ONE_LANE_TOTAL_MIN 4.0f
+#define ROAD_ONE_LANE_TOTAL_MAX 6.0f
+#define ROAD_ONE_LANE_TOTAL_DEFAULT 4.4f
+#define ROAD_WIDTH_CYCLE_BASE 1200.0f
+#define ROAD_WIDTH_RAMP 30.0f
+#define ROAD_WIDTH_CURVE_MARGIN 35.0f
+#define ROAD_TIGHT_CURVATURE (1.0f / 50.0f)
+#define ROAD_NARROW_WARN_HALF 3.0f
+#define ROAD_CREST_WARN_RATE 0.003f
+#define ROAD_WARN_AHEAD 100.0f
+#define ROAD_WARN_STEP 2.0f
+
+/* 4-lane anchor: flat span starts 30 m after the ramp and is 500 m long;
+ * the forced tight curve must start 150..270 m into the flat span. */
+#define ROAD_TIGHT_WINDOW_OFFSET 150.0f
+#define ROAD_TIGHT_WINDOW_LEN 120.0f
+#define ROAD_NARROW_AVOID_BEFORE 160.0f
+#define ROAD_NARROW_AVOID_AFTER 35.0f
+
+/* Lane-count thresholds on the asphalt half-width (metres). */
+#define ROAD_LANE_HALF_1 2.75f
+#define ROAD_LANE_HALF_2 5.5f
+#define ROAD_LANE_HALF_3 7.25f
+
+#define ROAD_TERRAIN_MIN_PCT 50.0f
+#define ROAD_TERRAIN_MAX_PCT 150.0f
+#define ROAD_TERRAIN_DEFAULT_PCT 100.0f
+#define ROAD_GRADE_BASE 0.12f
+#define ROAD_GRADE_MAX 0.18f
+#define ROAD_CREST_LENGTH 26.0f
+#define ROAD_VERT_RUN_BASE 7
+#define ROAD_HIGHWAY_RUN_MULT 48
+#define ROAD_HIGHWAY_GRADE_SCALE 0.25f
+#define ROAD_LANDING_FLATTEN 26.0f
+#define ROAD_LANDING_RUNWAY 150.0f
+#define ROAD_LANDING_GRADE_MAX 0.015f
+
+#define ROAD_TEXTURE_X 64
+#define ROAD_TEXTURE_Y 64
+#define ROAD_TEXTURE_PERIOD 16.0f /* world metres covered by one V repeat */
+#define ROAD_DASH_PERIOD 10.0f
+#define ROAD_DASH_LEN 5.0f
+#define ROAD_DASH_HALF_WIDTH 0.075f
+#define ROAD_DASH_LIFT 0.015f
+
+#define ROAD_POST_SPACING 40.0f
+#define ROAD_POST_X (ROAD_EDGE_X + 0.6f) /* 10.1 */
+
+#define ROAD_MESH_STEP 5.0f
+#define ROAD_NEAR_BEHIND 90.0f
+#define ROAD_WINDOW_BEHIND 1200.0f
+#define ROAD_WINDOW_AHEAD 1200.0f
+#define ROAD_MAX_SEGMENTS 160
+#define ROAD_REBASE_LIMIT 3000.0f
+#define ROAD_REBASE_STEP 960.0f
+#define ROAD_REBASE_ALIGN 80.0f /* LCM(16,40,5): keeps phases aligned */
+#define ROAD_SEED 0x5EED2A17u
+#define ROAD_START_STRAIGHT 120.0f
+
+/* Grammar (metres; radius for curves). */
+#define ROAD_STRAIGHT_MIN 40.0f
+#define ROAD_STRAIGHT_MAX 120.0f
+#define ROAD_GENTLE_RADIUS_MIN 60.0f
+#define ROAD_GENTLE_RADIUS_MAX 120.0f
+#define ROAD_TIGHT_RADIUS_MIN 25.0f
+#define ROAD_TIGHT_RADIUS_MAX 45.0f
+#define ROAD_GENTLE_ARC_MIN 50.0f
+#define ROAD_GENTLE_ARC_MAX 120.0f
+#define ROAD_TIGHT_ARC_MIN 25.0f
+#define ROAD_TIGHT_ARC_MAX 60.0f
+
+typedef enum {
+    ROAD_MAP_DEFAULT = 0,
+    ROAD_MAP_UPHILL,
+    ROAD_MAP_HIGHWAY,
+    ROAD_MAP_COUNT
+} road_map_t;
+
+typedef struct {
+    float elevation_pct;  /* 50..150, default 100 */
+    float hill_pct;       /* 50..150, default 100 */
+    float width_pct;      /* 50..150, default 100 */
+    float one_lane_width; /* total asphalt metres, 4.0..6.0, default 4.4 */
+    road_map_t map;       /* appended last; default ROAD_MAP_DEFAULT */
+} road_config_t;
+
+typedef struct {
+    float start_s;
+    float start_x, start_z;
+    float start_heading;
+    float length;
+    float curvature; /* 1/m, + = right */
+    float start_height;
+    float start_grade;
+    float grade_rate;
+    float crest_len;
+} road_segment_t;
+
+typedef struct {
+    float x, z;     /* centreline position in the current local frame */
+    float heading;  /* radians, 0 = +Z, + = right */
+    float curvature;/* 1/m */
+    float height;   /* centreline y */
+    float grade;    /* dy/ds, + uphill */
+    float grade_rate;/* d(grade)/ds */
+    float half_width;/* asphalt half-width */
+    float edge_half_width; /* asphalt + shoulder half-width */
+} road_sample_t;
+
+typedef struct {
+    bool narrow;
+    float narrow_distance;
+    bool crest;
+    float crest_distance;
+} road_warning_t;
+
+void road_config_defaults(road_config_t *cfg);
+bool road_config_validate(road_config_t *cfg);
+float road_width_cycle_length(const road_config_t *cfg);
+int road_vertical_run_max(const road_config_t *cfg);
+int road_lane_count(float half_width);
+int road_lane_dashes(float half_width);
+bool road_dash_on(float s);
+uint32_t road_seed_next(uint32_t *state);
+uint32_t road_next_start_seed(uint32_t *state);
+
+void road_reset(uint32_t seed);
+void road_reset_config(uint32_t seed, const road_config_t *cfg);
+
+/* Ensure the window covers car_s; returns the (possibly re-based) car_s. */
+float road_update(float car_s);
+
+/* Centreline pose at distance s (clamped/extrapolated outside the window). */
+road_sample_t road_sample(float s);
+
+/*
+ * First curve strictly ahead of from_s (start_s >= from_s + 1 m) whose
+ * |curvature| >= min_curvature and whose entrance is within ahead metres.
+ * Returns false when there is no such curve.
+ */
+bool road_next_curve(float from_s, float ahead, float min_curvature,
+                     float *distance, float *curvature);
+bool road_next_narrow(float from_s, float ahead, float max_half,
+                      float *distance, float *half_width);
+bool road_next_crest(float from_s, float ahead, float max_rate,
+                     float *distance, float *grade_rate);
+void road_warnings(float car_s, road_warning_t *out);
+
+int road_segment_count(void);
+const road_segment_t *road_segment_at(int index); /* 0 = oldest */
+
+#endif /* RACING_ROAD_H */

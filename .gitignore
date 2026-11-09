@@ -1,0 +1,9 @@
+build/
+*.o
+*.elf
+*.prx
+*.PBP
+*.pbp
+compile_commands.json
+.DS_Store
+__pycache__/
