@@ -18,7 +18,7 @@ static int failures;
 
 static const char *k_manifest =
     "PSPWIFI-CATALOG 1\n"
-    "# Current /data/backup/PSP/ builds.\n"
+    "# Current PSP builds.\n"
     "id=wifi\n"
     "title=WiFi Connection\n"
     "version=0.2.0\n"

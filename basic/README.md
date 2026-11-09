@@ -24,7 +24,7 @@ Each directory is a standalone CMake project:
 export PSPDEV=$HOME/pspdev
 export PATH=$PATH:$PSPDEV/bin
 
-cd /home/agent/psp-testsuite
+cd /path/to/psp-playground
 for app in hello shape controls; do
     mkdir -p "build/basic-$app"
     ( cd "build/basic-$app" &&
@@ -44,11 +44,12 @@ build/basic-controls/EBOOT.PBP
 ## Test in PPSSPP (headless)
 
 ```sh
+# Set PPSSPP_DIR to your PPSSPPHeadless build directory.
 for app in hello shape controls; do
     d="/tmp/opencode/ppsspp-basic-$app"
     mkdir -p "$d"
     cp "build/basic-$app/EBOOT.PBP" "$d/"
-    ( cd /home/agent/ppsspp/build &&
+    ( cd "$PPSSPP_DIR" &&
       ./PPSSPPHeadless "$d/EBOOT.PBP" --graphics=software --root="$d" \
         --timeout-emulated=2 --timeout-wall=60 --frame-stats \
         --screenshot-save="$d/screen.png" -l )
