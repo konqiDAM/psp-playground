@@ -1,0 +1,80 @@
+name: Build PSP
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: pspdev/pspdev:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Host tests
+        run: ./scripts/test.sh
+
+      - name: PSP build
+        run: ./scripts/build.sh
+
+      - name: Verify no *ForKernel imports
+        run: |
+          set -e
+          for elf in build/psp/psp_snake build/psp/cube3d/psp_cube3d \
+                    build/psp/racing/psp_racing build/psp/memtest/psp_memtest \
+                    build/psp/wifi/psp_wifi_app build/psp/wifi-test/psp_wifi_test \
+                    build/psp/psp_pong build/psp/psp_screen; do
+            if [ -f "$elf" ]; then
+              echo "=== $elf ==="
+              if psp-readelf -x .rodata.sceResident "$elf" | grep -qi 'ForKernel'; then
+                echo "FAIL: *ForKernel found in $elf"
+                exit 1
+              else
+                echo "OK: no *ForKernel"
+              fi
+            fi
+          done
+
+      - name: Verify MEMSIZE
+        run: python3 scripts/check-eboot-memsize.py
+
+      - name: Upload EBOOTs
+        uses: actions/upload-artifact@v4
+        with:
+          name: eboots
+          path: |
+            build/psp/EBOOT.PBP
+            build/psp/cube3d/EBOOT.PBP
+            build/psp/racing/EBOOT.PBP
+            build/psp/memtest/EBOOT.PBP
+            build/psp/screen/EBOOT.PBP
+            build/psp/pong/EBOOT.PBP
+            build/psp/wifi-test/EBOOT.PBP
+            build/psp/wifi/EBOOT.PBP
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: eboots
+          path: eboots
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            eboots/**/*.PBP
+          generate_release_notes: true
