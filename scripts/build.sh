@@ -8,7 +8,7 @@ export PATH="$PATH:$PSPDEV/bin"
 
 # 1 = extended memory (PSP-2000/3000/Go/Street, ~55 MiB under ARK 5.1+),
 # 0 = 24 MB universal (PSP-1000), 2 = pspdev's Vita-friendly +16 MiB mode.
-# See docs/PSP-DEV-GUIDE.md section 1.4.
+# See the PSP memory-partition notes.
 export PSP_MEMSIZE="${PSP_MEMSIZE:-1}"
 
 rm -rf build/psp

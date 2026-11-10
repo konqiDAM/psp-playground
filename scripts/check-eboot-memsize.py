@@ -10,7 +10,7 @@ MEMSIZE values (PARAM.SFO, dword):
     0 = 24 MB user partition (universal, PSP-1000)
     1 = extended partition (PSP-2000/3000/Go/Street; ~55 MiB under ARK 5.1+)
     2 = pspdev's Vita-friendly mode (ARK: +16 MiB, ~40 MiB total)
-See docs/PSP-DEV-GUIDE.md section 1.4.
+See the PSP memory-partition notes.
 """
 
 import glob

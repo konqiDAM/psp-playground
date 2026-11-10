@@ -22,7 +22,7 @@ PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 /* Use the whole user partition minus 4 MiB kept for the system (savedata
  * utility modules, thread stacks). In this SDK a negative heap size means
  * "all remaining", not "leave N MiB": PSP_HEAP_SIZE_KB(-1024) would leave
- * only the threshold (512 KiB by default). See docs/PSP-DEV-GUIDE.md 1.4. */
+ * only the threshold (512 KiB by default). See the PSP memory-partition notes. */
 PSP_HEAP_SIZE_KB(-1);
 PSP_HEAP_THRESHOLD_SIZE_KB(4096);
 

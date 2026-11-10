@@ -17,7 +17,7 @@
 PSP_MODULE_INFO("ScreenTest", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
 /* Deliberately minimal: this diagnostic keeps a 1 MiB heap. The games use
- * PSP_HEAP_SIZE_KB(-1) + a 4 MiB system reserve (docs/PSP-DEV-GUIDE.md 1.4). */
+ * PSP_HEAP_SIZE_KB(-1) + a 4 MiB system reserve (PSP memory-partition notes). */
 PSP_HEAP_SIZE_KB(1024);
 
 static int exit_callback(int arg1, int arg2, void *common)

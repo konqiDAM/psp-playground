@@ -7,7 +7,7 @@ project(psp_snake C)
 #   0 = 24 MB partition: universal, including PSP-1000.
 #   2 = ARK gives +16 MiB (40 MiB total); pspdev's Vita-friendly default.
 # Build a PSP-1000/universal EBOOT with: psp-cmake -DPSP_MEMSIZE=0 ...
-# See docs/PSP-DEV-GUIDE.md section 1.4 for the measured/verified details.
+# See the PSP memory-partition notes for the measured/verified details.
 set(PSP_MEMSIZE 1 CACHE STRING "PARAM.SFO MEMSIZE: 0=24MB universal, 1=extended (2000+), 2=Vita-friendly")
 
 set(CMAKE_C_STANDARD 99)

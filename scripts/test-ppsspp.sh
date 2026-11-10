@@ -5,18 +5,18 @@
 #   ./scripts/test-ppsspp.sh [output_dir]
 #
 # PPSSPP_HEADLESS can point to the binary; default:
-#   /home/agent/ppsspp/build/PPSSPPHeadless
+#   $HOME/ppsspp/build/PPSSPPHeadless
 #
 # Emulated FPS is NOT PSP hardware performance.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PPSSPP="${PPSSPP_HEADLESS:-/home/agent/ppsspp/build/PPSSPPHeadless}"
+PPSSPP="${PPSSPP_HEADLESS:-$HOME/ppsspp/build/PPSSPPHeadless}"
 OUT="${1:-build/ppsspp}"
 
 if [[ ! -x "$PPSSPP" ]]; then
     echo "error: PPSSPPHeadless not found at $PPSSPP" >&2
-    echo "set PPSSPP_HEADLESS or see docs/HEADLESS-TESTING.md" >&2
+    echo "set PPSSPP_HEADLESS or see the project test notes" >&2
     exit 1
 fi
 
