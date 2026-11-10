@@ -810,6 +810,125 @@ static void test_minimap_lateral_shift(void)
     CHECK(nearly(centre_3 - centre_0, -3.0f * 50.0f / 12.0f, 1.0f));
 }
 
+static void test_minimap_outline_counts(void)
+{
+    CHECK(MINIMAP_SAMPLES == 24);
+    CHECK(MINIMAP_CONTOUR_POINTS == 48);
+    CHECK(MINIMAP_OUTLINE_SEGMENTS == 48);
+    CHECK(MINIMAP_OUTLINE_VERTS == 288);
+    /* 288 outline + 3 marker + 3 chevron must fit MAX_MAP_VERTS (512). */
+    CHECK(MINIMAP_OUTLINE_VERTS + 6 == 294);
+    CHECK(MINIMAP_OUTLINE_VERTS + 6 <= 512);
+}
+
+static void test_minimap_outline_closed(void)
+{
+    car_state_t car = {0};
+    minimap_strip_t map;
+    minimap_point_t pts[MINIMAP_CONTOUR_POINTS];
+    int i;
+
+    road_reset(ROAD_SEED);
+    car.s = 50.0f;
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &map);
+    minimap_contour(&map, pts);
+
+    for (i = 0; i < MINIMAP_SAMPLES; i++) {
+        CHECK(nearly(pts[i].x, map.left_x[i], 1e-4f));
+        CHECK(nearly(pts[i].y, map.left_y[i], 1e-4f));
+        CHECK(nearly(pts[MINIMAP_SAMPLES + i].x,
+                     map.right_x[MINIMAP_SAMPLES - 1 - i], 1e-4f));
+        CHECK(nearly(pts[MINIMAP_SAMPLES + i].y,
+                     map.right_y[MINIMAP_SAMPLES - 1 - i], 1e-4f));
+    }
+    /* Far cap: pts[23] (left, 120 m ahead) -> pts[24] (right, 120 m ahead). */
+    CHECK(pts[24].x - pts[23].x > 0.0f);
+    /* Near cap closes the loop: pts[47] -> pts[0], both 12 m behind the car. */
+    CHECK(nearly(pts[0].y, pts[MINIMAP_CONTOUR_POINTS - 1].y, 0.01f));
+    CHECK(pts[0].x < pts[MINIMAP_CONTOUR_POINTS - 1].x);
+    CHECK(nearly(pts[0].y, 217.80f, 0.01f));
+}
+
+static void test_minimap_outline_thickness(void)
+{
+    car_state_t car = {0};
+    minimap_strip_t map;
+    minimap_point_t verts[MINIMAP_OUTLINE_VERTS];
+    float min_x, max_x, min_y, max_y;
+    int i;
+
+    road_reset(ROAD_SEED);
+    car.s = 50.0f;
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &map);
+    CHECK(minimap_outline(&map, MINIMAP_EDGE_THICKNESS, verts) ==
+          MINIMAP_OUTLINE_VERTS);
+    CHECK(MINIMAP_EDGE_THICKNESS == 2.0f);
+
+    /* Quad 0: first left-edge segment (pts[0] -> pts[1]), vertical. */
+    min_x = max_x = verts[0].x;
+    min_y = max_y = verts[0].y;
+    for (i = 1; i < 6; i++) {
+        if (verts[i].x < min_x) min_x = verts[i].x;
+        if (verts[i].x > max_x) max_x = verts[i].x;
+        if (verts[i].y < min_y) min_y = verts[i].y;
+        if (verts[i].y > max_y) max_y = verts[i].y;
+    }
+    CHECK(nearly(max_x - min_x, 2.0f, 0.01f));            /* thickness */
+    CHECK(nearly(min_x, 375.42f, 0.05f));                 /* centred on 376.42 */
+    CHECK(nearly(max_y - min_y, 3.7333f + 2.0f, 0.02f));  /* len + 1 px/end */
+    CHECK(nearly((min_y + max_y) * 0.5f, 215.935f, 0.01f));
+
+    /* Quad 47: near cap pts[47] -> pts[0], horizontal, 79.17 px long. */
+    min_x = max_x = verts[282].x;
+    min_y = max_y = verts[282].y;
+    for (i = 283; i < 288; i++) {
+        if (verts[i].x < min_x) min_x = verts[i].x;
+        if (verts[i].x > max_x) max_x = verts[i].x;
+        if (verts[i].y < min_y) min_y = verts[i].y;
+        if (verts[i].y > max_y) max_y = verts[i].y;
+    }
+    CHECK(nearly(max_x - min_x, 79.1667f + 2.0f, 0.02f));
+    CHECK(nearly(max_y - min_y, 2.0f, 0.01f));
+
+    for (i = 0; i < MINIMAP_OUTLINE_VERTS; i++) {
+        /*
+         * NaN-free and inside the projection clamp (358..474 / 124..226)
+         * plus half a thickness along u and n: the exact worst case is
+         * clamp -+ thickness/2 * sqrt(2) = 356.586..475.414, measured over
+         * 1547 car poses; 356/476 leaves a 0.586 px margin.
+         */
+        CHECK(verts[i].x == verts[i].x && verts[i].y == verts[i].y);
+        CHECK(verts[i].x >= 356.0f && verts[i].x <= 476.0f);
+        CHECK(verts[i].y >= 122.0f && verts[i].y <= 228.0f);
+    }
+}
+
+static void test_minimap_grammar_width(void)
+{
+    car_state_t car = {0};
+    minimap_strip_t def;
+    minimap_strip_t hw;
+    road_config_t c;
+    float def_w;
+    float hw_w;
+
+    road_config_defaults(&c);
+    road_reset_config(ROAD_SEED, &c);
+    car.s = 50.0f;
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &def);
+
+    c.map = ROAD_MAP_HIGHWAY;
+    road_reset_config(ROAD_SEED, &c);
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &hw);
+
+    def_w = def.right_x[0] - def.left_x[0];
+    hw_w = hw.right_x[0] - hw.left_x[0];
+    CHECK(nearly(def_w, 79.1667f, 0.5f));   /* 2-lane, edge 9.5 m */
+    CHECK(nearly(hw_w, 104.1667f, 0.5f));   /* 4-lane, edge 12.5 m */
+    CHECK(nearly(hw_w - def_w, 25.0f, 0.5f));
+    CHECK(hw_w > def_w);
+}
+
 static void test_minimap_variable_width(void)
 {
     car_state_t car = {0};
@@ -825,34 +944,6 @@ static void test_minimap_variable_width(void)
     p0 = road_sample(car.s - MINIMAP_BEHIND);
     width = map.right_x[0] - map.left_x[0];
     CHECK(nearly(width, 2.0f * p0.edge_half_width * 50.0f / 12.0f, 0.5f));
-    CHECK(nearly(map.asphalt_frac[0],
-                 p0.half_width / p0.edge_half_width, 1e-4f));
-    for (int i = 0; i < MINIMAP_SAMPLES; i++) {
-        float s = car.s - MINIMAP_BEHIND +
-                  (MINIMAP_BEHIND + MINIMAP_AHEAD) * (float)i /
-                      (float)(MINIMAP_SAMPLES - 1);
-        road_sample_t p = road_sample(s);
-
-        CHECK(nearly(map.asphalt_frac[i],
-                     p.half_width / p.edge_half_width, 1e-4f));
-    }
-}
-
-static void test_minimap_elevation_profile(void)
-{
-    car_state_t car = {0};
-    minimap_strip_t map;
-    road_config_t c;
-
-    road_config_defaults(&c);
-    road_reset_config(ROAD_SEED, &c);
-    car.s = 60.0f;
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &map);
-    for (int i = 0; i < MINIMAP_SAMPLES; i++) {
-        CHECK(map.profile_y[i] >= MINIMAP_PROFILE_Y0 - 1e-4f);
-        CHECK(map.profile_y[i] <= MINIMAP_PROFILE_Y1 + 1e-4f);
-    }
-    CHECK(map.profile_y[MINIMAP_SAMPLES - 1] < map.profile_y[0]);
 }
 
 /* ---------------------------------------------------------------------- menu */
@@ -1116,7 +1207,10 @@ int main(void)
     test_minimap_projection();
     test_minimap_lateral_shift();
     test_minimap_variable_width();
-    test_minimap_elevation_profile();
+    test_minimap_outline_counts();
+    test_minimap_outline_closed();
+    test_minimap_outline_thickness();
+    test_minimap_grammar_width();
 
     test_menu_start_opens_and_closes();
     test_menu_navigation_wraps();

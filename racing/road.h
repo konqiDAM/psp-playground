@@ -68,6 +68,22 @@
 #define ROAD_POST_SPACING 40.0f
 #define ROAD_POST_X (ROAD_EDGE_X + 0.6f) /* 10.1 */
 
+/* Guardrail: spans follow the road grammar and are deterministic from the seed. */
+#define ROAD_RAIL_LEAD 20.0f        /* span starts before the curve / plateau */
+#define ROAD_RAIL_TRAIL 15.0f       /* and ends after it */
+#define ROAD_RAIL_BLIND_GRADE 0.06f /* entrance grade <= -6 % => blind corner */
+#define ROAD_RAIL_DENSITY_DEFAULT 0.6f
+/* 48, not 24: the collector caps the *unmerged* per-(segment, side) list in
+ * ascending s order, so a dense two-sided stretch must not drop ahead spans
+ * (physics would still clamp there: an invisible wall). */
+#define ROAD_RAIL_MAX_SPANS 48
+#define ROAD_RAIL_STOP 1.05f        /* wheel half-width: clamp = edge - STOP */
+#define ROAD_RAIL_SIDE_LEFT 1
+#define ROAD_RAIL_SIDE_RIGHT 2
+#define ROAD_RAIL_KIND_OUTSIDE 1
+#define ROAD_RAIL_KIND_INSIDE 2
+#define ROAD_RAIL_KIND_NARROW 4
+
 #define ROAD_MESH_STEP 5.0f
 #define ROAD_NEAR_BEHIND 90.0f
 #define ROAD_WINDOW_BEHIND 1200.0f
@@ -104,6 +120,8 @@ typedef struct {
     float width_pct;      /* 50..150, default 100 */
     float one_lane_width; /* total asphalt metres, 4.0..6.0, default 4.4 */
     road_map_t map;       /* appended last; default ROAD_MAP_DEFAULT */
+    bool rail_enabled;    /* guardrail master switch; default true */
+    float rail_density;   /* 0..1, fraction of tight curves railed; 0.6 */
 } road_config_t;
 
 typedef struct {
@@ -116,6 +134,7 @@ typedef struct {
     float start_grade;
     float grade_rate;
     float crest_len;
+    signed char rail_side; /* 0, or ROAD_RAIL_SIDE_LEFT|ROAD_RAIL_SIDE_RIGHT */
 } road_segment_t;
 
 typedef struct {
@@ -127,6 +146,8 @@ typedef struct {
     float grade_rate;/* d(grade)/ds */
     float half_width;/* asphalt half-width */
     float edge_half_width; /* asphalt + shoulder half-width */
+    float rail_limit_left;  /* max |lateral| for the left wall; 0 = no rail */
+    float rail_limit_right; /* max |lateral| for the right wall; 0 = no rail */
 } road_sample_t;
 
 typedef struct {
@@ -135,6 +156,12 @@ typedef struct {
     bool crest;
     float crest_distance;
 } road_warning_t;
+
+typedef struct {
+    float s0, s1;        /* local s, s0 < s1, never clipped to the query */
+    signed char side;    /* -1 left, +1 right */
+    unsigned char kind;  /* ROAD_RAIL_KIND_* bit mask */
+} road_rail_span_t;
 
 void road_config_defaults(road_config_t *cfg);
 bool road_config_validate(road_config_t *cfg);
@@ -154,6 +181,25 @@ float road_update(float car_s);
 
 /* Centreline pose at distance s (clamped/extrapolated outside the window). */
 road_sample_t road_sample(float s);
+
+/*
+ * Lateral limit for one side of a sample: 0 for a NULL sample, a degenerate
+ * edge (edge_half_width <= 0) or a side without a rail; otherwise the limit,
+ * never wider than edge_half_width - CAR_EDGE_MARGIN.
+ * side > 0 = right, side < 0 = left.
+ */
+float road_rail_limit(const road_sample_t *p, int side);
+
+/* world_s = local_s + road_world_offset(). */
+float road_world_offset(void);
+
+/*
+ * Full rail intervals overlapping [s0, s1], one entry per side, sorted by
+ * (s0, side) with left before right and merged per side. Emitted spans are
+ * never clipped to the query, so the rise/sink envelope stays intact.
+ * Returns the number written (0..max).
+ */
+int road_rail_collect(float s0, float s1, road_rail_span_t *out, int max);
 
 /*
  * First curve strictly ahead of from_s (start_s >= from_s + 1 m) whose

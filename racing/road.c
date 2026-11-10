@@ -25,6 +25,8 @@ static int count; /* live segments */
 
 static uint32_t fwd_rng;
 static uint32_t bwd_rng;
+static uint32_t rail_fwd_rng;
+static uint32_t rail_bwd_rng;
 static uint32_t fwd_vert_rng;
 static uint32_t bwd_vert_rng;
 static int fwd_vert_dir;
@@ -113,6 +115,8 @@ void road_config_defaults(road_config_t *cfg)
     cfg->width_pct = ROAD_TERRAIN_DEFAULT_PCT;
     cfg->one_lane_width = ROAD_ONE_LANE_TOTAL_DEFAULT;
     cfg->map = ROAD_MAP_DEFAULT;
+    cfg->rail_enabled = true;
+    cfg->rail_density = ROAD_RAIL_DENSITY_DEFAULT;
 }
 
 static float config_value(float value, float low, float high, float def,
@@ -155,6 +159,8 @@ bool road_config_validate(road_config_t *cfg)
         cfg->map = ROAD_MAP_DEFAULT;
         changed = true;
     }
+    cfg->rail_density = config_value(cfg->rail_density, 0.0f, 1.0f,
+                                     ROAD_RAIL_DENSITY_DEFAULT, &changed);
     return changed;
 }
 
@@ -353,6 +359,8 @@ static road_sample_t eval_segment(const road_segment_t *seg, float t)
     }
     p.half_width = 0.0f;
     p.edge_half_width = 0.0f;
+    p.rail_limit_left = 0.0f;
+    p.rail_limit_right = 0.0f;
     return p;
 }
 
@@ -497,6 +505,27 @@ static float width_at(float world_s)
         return c->narrow_half + (normal - c->narrow_half) * t;
     }
     return normal;
+}
+
+/*
+ * Guardrail narrow corridor: a one-lane width event contributes a rail on
+ * both sides over [plateau - LEAD, plateau + flat_len + TRAIL], in *world*
+ * distance. Suppressed events and a disabled rail produce nothing.
+ */
+static int narrow_rail_window(int k, float *world_s0, float *world_s1)
+{
+    width_cycle_t *c;
+
+    if (!active_config.rail_enabled)
+        return 0;
+    c = width_cycle_get(k);
+    if (c->kind != WIDTH_EVENT_NARROW || c->suppressed)
+        return 0;
+    if (world_s0)
+        *world_s0 = c->s0 + c->flat_start - ROAD_RAIL_LEAD;
+    if (world_s1)
+        *world_s1 = c->s0 + c->flat_start + c->flat_len + ROAD_RAIL_TRAIL;
+    return 1;
 }
 
 static int width_tight_due(float world_s)
@@ -956,6 +985,50 @@ static void set_backward_vertical(road_segment_t *seg, float end_h,
     seg->start_height = end_h - 0.5f * (start_g + end_g) * seg->length;
 }
 
+/* ------------------------------------------------------------- guardrail */
+
+/*
+ * Dedicated rail stream. The draw is taken even when rails are disabled so
+ * that enabling/disabling the feature cannot shift any later decision.
+ */
+static int rail_draw(uint32_t *state, float density)
+{
+    uint32_t r = rng_next(state);
+
+    return (float)(r >> 8) * RNG_SCALE < clampf(density, 0.0f, 1.0f);
+}
+
+/*
+ * Decide the rail sides of a new segment. Outside of a tight curve is the
+ * drawn case (density); inside of a blind curve is unconditional. The two
+ * rules always land on opposite sides, so a side's kind is unambiguous.
+ */
+static void assign_rail(road_segment_t *seg, uint32_t *rng)
+{
+    int side = 0;
+    int tight = fabsf(seg->curvature) >= ROAD_TIGHT_CURVATURE;
+    int blind = fabsf(seg->curvature) > 1e-5f &&
+                seg->start_grade <= -ROAD_RAIL_BLIND_GRADE;
+
+    if (tight && rail_draw(rng, active_config.rail_density))
+        side |= (seg->curvature > 0.0f) ? ROAD_RAIL_SIDE_LEFT
+                                        : ROAD_RAIL_SIDE_RIGHT;
+    if (blind)
+        side |= (seg->curvature > 0.0f) ? ROAD_RAIL_SIDE_RIGHT
+                                        : ROAD_RAIL_SIDE_LEFT;
+    if (!active_config.rail_enabled)
+        side = 0;
+    seg->rail_side = (signed char)side;
+}
+
+static int rail_span_kind(const road_segment_t *seg, int side)
+{
+    int inside_side = (seg->curvature > 0.0f) ? 1 : -1;
+
+    return (side == inside_side) ? ROAD_RAIL_KIND_INSIDE
+                                 : ROAD_RAIL_KIND_OUTSIDE;
+}
+
 static void append_forward(void)
 {
     road_segment_t seg;
@@ -981,6 +1054,7 @@ static void append_forward(void)
 
     choose_forward(&seg);
     set_forward_vertical(&seg, start_h, start_g);
+    assign_rail(&seg, &rail_fwd_rng);
     push_back(seg);
 }
 
@@ -1018,6 +1092,7 @@ static void prepend_backward(void)
             jz - (sinf(jh) - sinf(seg.start_heading)) / seg.curvature;
     }
     seg.start_s = first->start_s - seg.length;
+    assign_rail(&seg, &rail_bwd_rng);
     push_front(seg);
 }
 
@@ -1049,6 +1124,12 @@ void road_reset_config(uint32_t seed, const road_config_t *cfg)
     bwd_rng = seed ^ 0xA5A5A5A5u;
     if (bwd_rng == 0)
         bwd_rng = 1u;
+    rail_fwd_rng = seed ^ 0x2C1B3C6Du;
+    if (rail_fwd_rng == 0)
+        rail_fwd_rng = 1u;
+    rail_bwd_rng = seed ^ 0x5C6E9A31u;
+    if (rail_bwd_rng == 0)
+        rail_bwd_rng = 1u;
     fwd_vert_rng = seed ^ 0x9E3779B9u;
     if (fwd_vert_rng == 0)
         fwd_vert_rng = 1u;
@@ -1162,6 +1243,7 @@ road_sample_t road_sample(float s)
         p.x = p.z = p.heading = p.curvature = 0.0f;
         p.height = p.grade = p.grade_rate = 0.0f;
         p.half_width = p.edge_half_width = 0.0f;
+        p.rail_limit_left = p.rail_limit_right = 0.0f;
         return p;
     }
 
@@ -1173,7 +1255,196 @@ road_sample_t road_sample(float s)
     p = eval_segment(seg, t);
     p.half_width = width_at(s + world_offset);
     p.edge_half_width = p.half_width + ROAD_SHOULDER_WIDTH;
+
+    /* Per-side rail limits: curve spans from the segments i-1..i+1 (the
+     * grammar's 25 m minimum segment makes any further one unreachable), plus
+     * the world-anchored narrow corridors. */
+    p.rail_limit_left = 0.0f;
+    p.rail_limit_right = 0.0f;
+    if (active_config.rail_enabled) {
+        float rail = p.edge_half_width - ROAD_RAIL_STOP;
+        float world_s = s + world_offset;
+        int j;
+
+        if (rail > 0.0f) {
+            for (j = i - 1; j <= i + 1; j++) {
+                const road_segment_t *near;
+                float a;
+                float b;
+
+                if (j < 0 || j >= count)
+                    continue;
+                near = at(j);
+                a = near->start_s - ROAD_RAIL_LEAD;
+                b = near->start_s + near->length + ROAD_RAIL_TRAIL;
+                if (s < a || s > b)
+                    continue;
+                if (near->rail_side & ROAD_RAIL_SIDE_LEFT)
+                    p.rail_limit_left = rail;
+                if (near->rail_side & ROAD_RAIL_SIDE_RIGHT)
+                    p.rail_limit_right = rail;
+            }
+            {
+                float cycle = road_width_cycle_length(&active_config);
+                int k0 = (int)floorf((world_s - width_phase()) / cycle);
+                int k;
+
+                for (k = k0 - 1; k <= k0 + 1; k++) {
+                    float a;
+                    float b;
+
+                    if (!narrow_rail_window(k, &a, &b))
+                        continue;
+                    if (world_s >= a && world_s <= b) {
+                        p.rail_limit_left = rail;
+                        p.rail_limit_right = rail;
+                    }
+                }
+            }
+        }
+    }
     return p;
+}
+
+float road_rail_limit(const road_sample_t *p, int side)
+{
+    float plain;
+    float rail;
+
+    if (!p || p->edge_half_width <= 0.0f)
+        return 0.0f;
+    plain = p->edge_half_width - CAR_EDGE_MARGIN;
+    rail = (side > 0) ? p->rail_limit_right : p->rail_limit_left;
+    return (rail > 0.0f && rail < plain) ? rail : plain;
+}
+
+float road_world_offset(void)
+{
+    return world_offset;
+}
+
+static void rail_sort(road_rail_span_t *out, int n)
+{
+    int i;
+
+    for (i = 1; i < n; i++) {
+        road_rail_span_t key = out[i];
+        int j = i - 1;
+
+        while (j >= 0 && (out[j].s0 > key.s0 ||
+                          (out[j].s0 == key.s0 && out[j].side > key.side))) {
+            out[j + 1] = out[j];
+            j--;
+        }
+        out[j + 1] = key;
+    }
+}
+
+static int rail_merge(road_rail_span_t *src, int n, road_rail_span_t *out)
+{
+    int m = 0;
+    int s;
+    int i;
+
+    for (s = 0; s < 2; s++) {
+        int side = (s == 0) ? -1 : 1;
+        int start = m;
+
+        for (i = 0; i < n; i++) {
+            if (src[i].side != side)
+                continue;
+            if (m > start && src[i].s0 <= out[m - 1].s1 + 1e-3f) {
+                if (src[i].s1 > out[m - 1].s1)
+                    out[m - 1].s1 = src[i].s1;
+                out[m - 1].kind |= src[i].kind;
+            } else {
+                out[m++] = src[i];
+            }
+        }
+    }
+    rail_sort(out, m);
+    return m;
+}
+
+int road_rail_collect(float s0, float s1, road_rail_span_t *out, int max)
+{
+    road_rail_span_t tmp[ROAD_RAIL_MAX_SPANS];
+    int cap = (max < ROAD_RAIL_MAX_SPANS) ? max : ROAD_RAIL_MAX_SPANS;
+    int n = 0;
+    int i;
+    float cycle;
+
+    if (!out || cap <= 0)
+        return 0;
+    if (s0 > s1) {
+        float swap = s0;
+
+        s0 = s1;
+        s1 = swap;
+    }
+
+    /* Keep room for the narrow intervals appended below: a dense curve
+     * stretch must never starve the one-lane corridor rails that physics
+     * still clamps (an invisible wall). At most 4 cycles x 2 sides reach the
+     * cap for the renderer's 520 m query; 8 slots cover wider ones. */
+    {
+        int curve_cap = cap - 8;
+
+        if (curve_cap < 0)
+            curve_cap = 0;
+        for (i = 0; i < count && n < curve_cap; i++) {
+            const road_segment_t *seg = at(i);
+            float a = seg->start_s - ROAD_RAIL_LEAD;
+            float b = seg->start_s + seg->length + ROAD_RAIL_TRAIL;
+
+            if (b < s0 || a > s1)
+                continue;
+            if (seg->rail_side & ROAD_RAIL_SIDE_LEFT) {
+                tmp[n].s0 = a;
+                tmp[n].s1 = b;
+                tmp[n].side = -1;
+                tmp[n].kind = (unsigned char)rail_span_kind(seg, -1);
+                n++;
+            }
+            if ((seg->rail_side & ROAD_RAIL_SIDE_RIGHT) && n < curve_cap) {
+                tmp[n].s0 = a;
+                tmp[n].s1 = b;
+                tmp[n].side = 1;
+                tmp[n].kind = (unsigned char)rail_span_kind(seg, 1);
+                n++;
+            }
+        }
+    }
+
+    cycle = road_width_cycle_length(&active_config);
+    {
+        float world_s0 = s0 + world_offset;
+        float world_s1 = s1 + world_offset;
+        int k0 = (int)floorf((world_s0 - width_phase()) / cycle);
+        int k1 = (int)floorf((world_s1 - width_phase()) / cycle);
+        int k;
+
+        for (k = k0 - 1; k <= k1 + 1; k++) {
+            float a;
+            float b;
+            int side;
+
+            if (!narrow_rail_window(k, &a, &b))
+                continue;
+            if (b < world_s0 || a > world_s1)
+                continue;
+            for (side = 0; side < 2 && n < cap; side++) {
+                tmp[n].s0 = a - world_offset;
+                tmp[n].s1 = b - world_offset;
+                tmp[n].side = (side == 0) ? -1 : 1;
+                tmp[n].kind = ROAD_RAIL_KIND_NARROW;
+                n++;
+            }
+        }
+    }
+
+    rail_sort(tmp, n);
+    return rail_merge(tmp, n, out);
 }
 
 bool road_next_curve(float from_s, float ahead, float min_curvature,

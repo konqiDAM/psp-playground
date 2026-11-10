@@ -8,6 +8,10 @@
 
 #include "road.h"
 
+/* Shorter than this and a contour segment has no usable direction (two
+ * samples clamped onto the same map-edge point): draw a dot instead. */
+#define MINIMAP_MIN_SEGMENT 1e-4f
+
 static float clampf(float value, float low, float high)
 {
     if (value < low)
@@ -47,9 +51,6 @@ void minimap_build(const car_state_t *car, float x0, float y0, float x1,
     float sx = ((x1 - x0) * 0.5f) / MINIMAP_LATERAL;
     float sy = (cy - y0) / MINIMAP_AHEAD;
     float span = MINIMAP_BEHIND + MINIMAP_AHEAD;
-    float heights[MINIMAP_SAMPLES];
-    float hmin = 1e30f;
-    float hmax = -1e30f;
     int i;
 
     out->count = MINIMAP_SAMPLES;
@@ -71,25 +72,6 @@ void minimap_build(const car_state_t *car, float x0, float y0, float x1,
                       x0, y0, x1, y1, &out->left_x[i], &out->left_y[i]);
         project_point(rxw, rzw, car_x, car_z, tx, tz, rx, rz, cx, cy, sx, sy,
                       x0, y0, x1, y1, &out->right_x[i], &out->right_y[i]);
-        out->asphalt_frac[i] =
-            (p.edge_half_width > 1e-4f)
-                ? p.half_width / p.edge_half_width
-                : 0.5f;
-        heights[i] = p.height;
-        if (p.height < hmin) hmin = p.height;
-        if (p.height > hmax) hmax = p.height;
-    }
-
-    for (i = 0; i < MINIMAP_SAMPLES; i++) {
-        if (hmax - hmin < 0.5f) {
-            out->profile_y[i] = (MINIMAP_PROFILE_Y0 + MINIMAP_PROFILE_Y1) *
-                                0.5f;
-        } else {
-            out->profile_y[i] =
-                MINIMAP_PROFILE_Y1 -
-                (heights[i] - hmin) / (hmax - hmin) *
-                    (MINIMAP_PROFILE_Y1 - MINIMAP_PROFILE_Y0);
-        }
     }
 
     out->has_curve = road_next_curve(car->s, MINIMAP_AHEAD, MINIMAP_CURVE_MIN,
@@ -99,4 +81,74 @@ void minimap_build(const car_state_t *car, float x0, float y0, float x1,
         out->curve_distance = 0.0f;
         out->curve_curvature = 0.0f;
     }
+}
+
+void minimap_contour(const minimap_strip_t *map, minimap_point_t *points)
+{
+    int i;
+
+    for (i = 0; i < MINIMAP_SAMPLES; i++) {
+        points[i].x = map->left_x[i];
+        points[i].y = map->left_y[i];
+    }
+    for (i = 0; i < MINIMAP_SAMPLES; i++) {
+        points[MINIMAP_SAMPLES + i].x = map->right_x[MINIMAP_SAMPLES - 1 - i];
+        points[MINIMAP_SAMPLES + i].y = map->right_y[MINIMAP_SAMPLES - 1 - i];
+    }
+}
+
+/*
+ * One thin quad per closed segment, as two triangles. Each quad is extended
+ * by half a thickness past both ends so neighbouring quads overlap at the
+ * joints; a degenerate (clamped-away) segment falls back to a square dot
+ * instead of dividing by a zero length.
+ */
+int minimap_outline(const minimap_strip_t *map, float thickness,
+                    minimap_point_t *out)
+{
+    minimap_point_t pts[MINIMAP_CONTOUR_POINTS];
+    float half = thickness * 0.5f;
+    int i;
+
+    minimap_contour(map, pts);
+    for (i = 0; i < MINIMAP_OUTLINE_SEGMENTS; i++) {
+        const minimap_point_t *a = &pts[i];
+        const minimap_point_t *b = &pts[(i + 1) % MINIMAP_CONTOUR_POINTS];
+        float dx = b->x - a->x;
+        float dy = b->y - a->y;
+        float len = sqrtf(dx * dx + dy * dy);
+        float ux = 1.0f;
+        float uy = 0.0f;
+        float nx;
+        float ny;
+        float ax;
+        float ay;
+        float bx;
+        float by;
+        minimap_point_t *v = &out[i * 6];
+
+        if (len > MINIMAP_MIN_SEGMENT) {
+            ux = dx / len;
+            uy = dy / len;
+        }
+        nx = -uy;
+        ny = ux;
+        /* Extend by half a thickness along the segment, at both ends. */
+        ax = a->x - ux * half;
+        ay = a->y - uy * half;
+        bx = b->x + ux * half;
+        by = b->y + uy * half;
+
+        v[0].x = ax + nx * half;
+        v[0].y = ay + ny * half;
+        v[1].x = bx + nx * half;
+        v[1].y = by + ny * half;
+        v[2].x = bx - nx * half;
+        v[2].y = by - ny * half;
+        v[3] = v[0];
+        v[4] = v[2];
+        v[5].x = ax - nx * half;
+        v[5].y = ay - ny * half;
+    }
+    return MINIMAP_OUTLINE_VERTS;
 }

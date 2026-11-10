@@ -42,6 +42,9 @@ void car_reset(car_state_t *car)
     car->susp_vel = 0.0f;
     car->pitch = 0.0f;
     car->airborne = false;
+    car->rail_hold = 0.0f;
+    car->rail_side = 0;
+    car->rail_contact = false;
 }
 
 float car_kmh(const car_state_t *car)
@@ -137,8 +140,6 @@ void car_step(car_state_t *car, const car_input_t *input, float dt,
         }
     }
     car->speed = speed;
-    car->long_accel =
-        (dt > 1e-6f) ? (car->speed - speed_before) / dt : 0.0f;
 
     /* Speed-sensitive yaw request, capped by available lateral grip. */
     v = fabsf(speed);
@@ -200,10 +201,42 @@ void car_step(car_state_t *car, const car_input_t *input, float dt,
     car->slip = clampf(car->slip, -CAR_MAX_SLIP, CAR_MAX_SLIP);
 
     car->s += ds;
-    car->lateral += speed * sinf(car->slip) * dt;
-    car->lateral = clampf(car->lateral,
-                          -(car->road_edge_half_width - CAR_EDGE_MARGIN),
-                          car->road_edge_half_width - CAR_EDGE_MARGIN);
+    {
+        float limit_left = road_rail_limit(road, -1);
+        float limit_right = road_rail_limit(road, 1);
+        float next = car->lateral + speed * sinf(car->slip) * dt;
+        int rail_hit = 0;
+
+        /* Clamp every step exactly as before; only a real rail may react. */
+        if (next > limit_right) {
+            next = limit_right;
+            if (road->rail_limit_right > 0.0f)
+                rail_hit = 1;
+        } else if (next < -limit_left) {
+            next = -limit_left;
+            if (road->rail_limit_left > 0.0f)
+                rail_hit = -1;
+        }
+        if (rail_hit > 0 && car->slip > 0.0f)
+            car->slip = 0.0f; /* yaw into the wall */
+        if (rail_hit < 0 && car->slip < 0.0f)
+            car->slip = 0.0f;
+        car->lateral = next;
+        if (rail_hit != 0) {
+            if (!car->rail_contact)
+                car->speed *= 1.0f - CAR_RAIL_SCRUB;
+            car->rail_hold = CAR_RAIL_HOLD;
+            car->rail_side = (signed char)rail_hit;
+            car->yaw_rate = 0.0f;
+        } else {
+            car->rail_hold = fmaxf(0.0f, car->rail_hold - dt);
+            if (car->rail_hold <= 0.0f)
+                car->rail_side = 0;
+        }
+        car->rail_contact = rail_hit != 0;
+    }
+    car->long_accel =
+        (dt > 1e-6f) ? (car->speed - speed_before) / dt : 0.0f;
 
     /* Vertical: launch on a sharp crest, gravity in the air, land/settle. */
     if (!car->airborne) {
@@ -259,4 +292,14 @@ bool car_is_offroad(const car_state_t *car)
 bool car_is_slipping(const car_state_t *car)
 {
     return car->slip_hold > 0.0f;
+}
+
+bool car_is_rail_hit(const car_state_t *car)
+{
+    return car->rail_hold > 0.0f;
+}
+
+int car_rail_side(const car_state_t *car)
+{
+    return (int)car->rail_side;
 }

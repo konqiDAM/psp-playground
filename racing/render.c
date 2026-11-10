@@ -26,6 +26,9 @@
 #include "minimap.h"
 #include "road.h"
 
+#include "assets/guardrail/guardrail_gu.h"
+#include "assets/roadsigns/signs_gu.h"
+
 #define SCREEN_W 480
 #define SCREEN_H 272
 #define BUF_W 512
@@ -33,6 +36,11 @@
 
 #define MAX_HUD_VERTS 4096
 #define MAX_MAP_VERTS 512
+
+/* 288 outline + 3 car marker + 3 chevron. */
+#if (MINIMAP_OUTLINE_VERTS + 6) > MAX_MAP_VERTS
+#error "minimap outline does not fit MAX_MAP_VERTS"
+#endif
 
 #define RGB(r, g, b)                                                           \
     (0xFF000000u | ((uint32_t)(b) << 16) | ((uint32_t)(g) << 8) |             \
@@ -60,6 +68,7 @@
 #define COL_HUD_LABEL RGB(0xB0, 0xC0, 0xC8)
 #define COL_HUD_TEXT RGB(0xF0, 0xF4, 0xF8)
 #define COL_HUD_ACCENT RGB(0xFF, 0xE0, 0x40)
+#define COL_MAP_EDGE RGB(0xC0, 0xC8, 0xD0)
 #define COL_HUD_WARN RGB(0xFF, 0x90, 0x20)
 #define COL_HUD_SLIP RGB(0xFF, 0x50, 0x30)
 #define COL_SHADOW 0x38000000u
@@ -111,6 +120,7 @@ static int car_mesh_count;
 static Vtx hud_verts[MAX_HUD_VERTS] __attribute__((aligned(16)));
 static int hud_count;
 static Vtx map_verts[MAX_MAP_VERTS] __attribute__((aligned(16)));
+static minimap_point_t map_outline[MINIMAP_OUTLINE_VERTS];
 static float cam_lat;
 static float view_x;
 static float view_z;
@@ -906,13 +916,10 @@ static void draw_minimap(const render_frame_args_t *args)
     minimap_strip_t map;
     Vtx *v;
     int i;
-    int shoulder_count = MINIMAP_SAMPLES * 2;
-    int asphalt_offset = shoulder_count;
-    int marker_offset = shoulder_count * 2;
+    int marker_offset = MINIMAP_OUTLINE_VERTS;
     int chevron_offset = marker_offset + 3;
-    int profile_offset = chevron_offset + 3;
-    int profile_count = (MINIMAP_SAMPLES - 1) * 6;
-    int total;
+    int total = chevron_offset + 3;
+    uint32_t marker_colour;
 
     if (!args->settings->minimap)
         return;
@@ -921,32 +928,20 @@ static void draw_minimap(const render_frame_args_t *args)
     if (map.count != MINIMAP_SAMPLES)
         return;
 
-    for (i = 0; i < MINIMAP_SAMPLES; i++) {
-        float width = map.right_x[i] - map.left_x[i];
-        float frac = map.asphalt_frac[i];
-        float inset = width * (1.0f - frac) * 0.5f;
-        float inset_y = (map.right_y[i] - map.left_y[i]) *
-                        (1.0f - frac) * 0.5f;
+    if (minimap_outline(&map, MINIMAP_EDGE_THICKNESS, map_outline) !=
+        MINIMAP_OUTLINE_VERTS)
+        return;
+    for (i = 0; i < MINIMAP_OUTLINE_VERTS; i++)
+        map_set(&map_verts[i], map_outline[i].x, map_outline[i].y,
+                COL_MAP_EDGE);
 
-        map_set(&map_verts[i * 2 + 0], map.left_x[i], map.left_y[i],
-                COL_SHOULDER);
-        map_set(&map_verts[i * 2 + 1], map.right_x[i], map.right_y[i],
-                COL_SHOULDER);
-        map_set(&map_verts[asphalt_offset + i * 2 + 0],
-                map.left_x[i] + inset, map.left_y[i] + inset_y, COL_ASPHALT);
-        map_set(&map_verts[asphalt_offset + i * 2 + 1],
-                map.right_x[i] - inset, map.right_y[i] - inset_y,
-                COL_ASPHALT);
-    }
-
+    marker_colour = car_is_offroad(args->car) ? COL_HUD_WARN : COL_HUD_TEXT;
     map_set(&map_verts[marker_offset + 0], map.car_x, map.car_y - 6.0f,
-            car_is_offroad(args->car) ? COL_HUD_WARN : COL_HUD_TEXT);
+            marker_colour);
     map_set(&map_verts[marker_offset + 1], map.car_x - 4.0f,
-            map.car_y + 2.0f,
-            car_is_offroad(args->car) ? COL_HUD_WARN : COL_HUD_TEXT);
+            map.car_y + 2.0f, marker_colour);
     map_set(&map_verts[marker_offset + 2], map.car_x + 4.0f,
-            map.car_y + 2.0f,
-            car_is_offroad(args->car) ? COL_HUD_WARN : COL_HUD_TEXT);
+            map.car_y + 2.0f, marker_colour);
 
     if (map.has_curve) {
         float x = map.car_x + (map.curve_curvature > 0.0f ? 18.0f : -18.0f);
@@ -968,36 +963,14 @@ static void draw_minimap(const render_frame_args_t *args)
         }
     }
 
-    for (i = 0; i < MINIMAP_SAMPLES - 1; i++) {
-        float x0 = 366.0f + (float)i * 100.0f /
-                               (float)(MINIMAP_SAMPLES - 1);
-        float x1 = 366.0f + (float)(i + 1) * 100.0f /
-                               (float)(MINIMAP_SAMPLES - 1);
-        float y0 = map.profile_y[i];
-        float y1 = map.profile_y[i + 1];
-        int o = profile_offset + i * 6;
-
-        map_set(&map_verts[o + 0], x0, y0, COL_HUD_ACCENT);
-        map_set(&map_verts[o + 1], x1, y1, COL_HUD_ACCENT);
-        map_set(&map_verts[o + 2], x1, y1 + 2.0f, COL_HUD_ACCENT);
-        map_set(&map_verts[o + 3], x0, y0, COL_HUD_ACCENT);
-        map_set(&map_verts[o + 4], x1, y1 + 2.0f, COL_HUD_ACCENT);
-        map_set(&map_verts[o + 5], x0, y0 + 2.0f, COL_HUD_ACCENT);
-    }
-
-    total = profile_offset + profile_count;
     v = alloc_verts(total);
     if (!v)
         return;
     memcpy(v, map_verts, (size_t)total * sizeof(Vtx));
-    sceGuDrawArray(GU_TRIANGLE_STRIP, V2D_FMT, shoulder_count, NULL, v);
-    sceGuDrawArray(GU_TRIANGLE_STRIP, V2D_FMT, shoulder_count, NULL,
-                   v + asphalt_offset);
+    sceGuDrawArray(GU_TRIANGLES, V2D_FMT, MINIMAP_OUTLINE_VERTS, NULL, v);
     sceGuDrawArray(GU_TRIANGLES, V2D_FMT, 3, NULL, v + marker_offset);
     if (map.has_curve)
         sceGuDrawArray(GU_TRIANGLES, V2D_FMT, 3, NULL, v + chevron_offset);
-    sceGuDrawArray(GU_TRIANGLES, V2D_FMT, profile_count, NULL,
-                   v + profile_offset);
 }
 
 /* ------------------------------------------------------------------ menu */
@@ -1438,7 +1411,12 @@ void render_frame(const render_frame_args_t *args, float dt)
     sceGuDisable(GU_TEXTURE_2D);
     draw_lane_dashes(s0, s1);
 
+    /* Roadside guardrail: draw hook owned by the guardrail task. */
+    guardrail_draw(car, args->settings);
+
     draw_posts(car->s);
+    /* Roadside signs: draw hook owned by the roadsigns task. */
+    signs_draw(car, args->settings);
     draw_shadow(car->s, car_x, car_z, yaw);
     draw_car(car, car_x, car_y, car_z, yaw);
 

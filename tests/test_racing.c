@@ -2161,6 +2161,491 @@ static void test_throttle_and_brake_apply_together(void)
     CHECK(full.speed < light.speed - 5.0f);
 }
 
+/* ------------------------------------------------------------ guardrail */
+
+static void test_rail_config_defaults(void)
+{
+    road_config_t c;
+    road_config_t bad;
+
+    road_config_defaults(&c);
+    CHECK(c.rail_enabled);
+    CHECK(nearly(c.rail_density, ROAD_RAIL_DENSITY_DEFAULT, 1e-6f));
+
+    road_config_defaults(&bad);
+    bad.rail_density = 1.5f;
+    CHECK(road_config_validate(&bad));
+    CHECK(nearly(bad.rail_density, 1.0f, 1e-6f));
+    bad.rail_density = -0.25f;
+    CHECK(road_config_validate(&bad));
+    CHECK(nearly(bad.rail_density, 0.0f, 1e-6f));
+    bad.rail_density = NAN;
+    CHECK(road_config_validate(&bad));
+    CHECK(nearly(bad.rail_density, ROAD_RAIL_DENSITY_DEFAULT, 1e-6f));
+}
+
+static void test_rail_limit_fallback(void)
+{
+    road_sample_t p = flat_road(0.0f);
+
+    CHECK(nearly(road_rail_limit(&p, +1), CAR_LATERAL_LIMIT, 1e-4f)); /* 9.1 */
+    CHECK(nearly(road_rail_limit(&p, -1), CAR_LATERAL_LIMIT, 1e-4f));
+
+    p.rail_limit_right = 8.45f;
+    CHECK(nearly(road_rail_limit(&p, +1), 8.45f, 1e-4f));
+    CHECK(nearly(road_rail_limit(&p, -1), CAR_LATERAL_LIMIT, 1e-4f));
+    CHECK(road_rail_limit(NULL, +1) == 0.0f);      /* defensive */
+    CHECK(road_rail_limit(NULL, -1) == 0.0f);
+}
+
+static void test_rail_limit_never_widens(void)
+{
+    road_sample_t p = flat_road(0.0f);
+
+    p.rail_limit_left = 20.0f;              /* nonsense: beyond the shoulder */
+    CHECK(nearly(road_rail_limit(&p, -1), CAR_LATERAL_LIMIT, 1e-4f));
+    p.edge_half_width = 0.0f;               /* off-window sample */
+    p.rail_limit_left = 3.0f;
+    CHECK(road_rail_limit(&p, -1) == 0.0f);
+
+    /* One source of truth: physics and road must agree on the margin. */
+    CHECK(CAR_RAIL_MARGIN == ROAD_RAIL_STOP);
+}
+
+static void rail_entries(float car_s, float a, float b, road_rail_span_t *out,
+                         int *count)
+{
+    road_update(car_s);
+    *count = road_rail_collect(a, b, out, ROAD_RAIL_MAX_SPANS);
+}
+
+static void test_rail_spans_at_seed(void)
+{
+    /* car_s 1000 keeps [400, 2100] inside the ring. Table: plan §1.2. */
+    road_rail_span_t s[ROAD_RAIL_MAX_SPANS];
+    int n;
+    int i;
+
+    road_reset(ROAD_SEED);
+    rail_entries(1000.0f, 400.0f, 2100.0f, s, &n);
+    CHECK(n == 8);
+    CHECK(nearly(s[0].s0, 482.856f, 0.2f) &&
+          nearly(s[0].s1, 597.589f, 0.2f) &&
+          s[0].side == -1 && (s[0].kind & ROAD_RAIL_KIND_INSIDE));
+    CHECK(nearly(s[1].s0, 797.413f, 0.2f) &&
+          nearly(s[1].s1, 1064.258f, 0.2f) && s[1].side == -1 &&
+          (s[1].kind & ROAD_RAIL_KIND_NARROW));
+    CHECK(nearly(s[2].s0, 797.413f, 0.2f) && s[2].side == +1 &&
+          (s[2].kind & ROAD_RAIL_KIND_NARROW));
+    CHECK(nearly(s[3].s0, 1270.424f, 0.2f) &&
+          nearly(s[3].s1, 1337.682f, 0.2f) && s[3].side == -1 &&
+          s[3].kind == ROAD_RAIL_KIND_OUTSIDE);
+    CHECK(nearly(s[4].s0, 1270.424f, 0.2f) && s[4].side == +1 &&
+          s[4].kind == ROAD_RAIL_KIND_INSIDE);
+    CHECK(nearly(s[5].s0, 1345.039f, 0.2f) &&
+          nearly(s[5].s1, 1490.431f, 0.2f) && s[5].side == -1 &&
+          s[5].kind == (ROAD_RAIL_KIND_OUTSIDE | ROAD_RAIL_KIND_INSIDE));
+    CHECK(nearly(s[6].s0, 1345.039f, 0.2f) &&
+          nearly(s[6].s1, 1405.444f, 0.2f) && s[6].side == +1 &&
+          s[6].kind == ROAD_RAIL_KIND_OUTSIDE);
+    CHECK(nearly(s[7].s0, 1831.306f, 0.2f) &&
+          nearly(s[7].s1, 1968.005f, 0.2f) && s[7].side == -1 &&
+          s[7].kind == ROAD_RAIL_KIND_OUTSIDE);
+    for (i = 0; i < n; i++) {
+        CHECK(s[i].s0 < s[i].s1 && (s[i].side == -1 || s[i].side == +1));
+        if (i > 0)
+            CHECK(s[i - 1].s0 < s[i].s0 ||
+                  (s[i - 1].s0 == s[i].s0 && s[i - 1].side < s[i].side));
+    }
+    /* curve #1 (608.589) drew no rail: its span must be absent. */
+    for (i = 0; i < n; i++)
+        CHECK(!(s[i].s0 > 560.0f && s[i].s1 < 700.0f));
+}
+
+static void test_rail_limits_follow_spans(void)
+{
+    road_config_t c;
+    road_sample_t narrow;
+    road_sample_t blind;
+    road_sample_t plain;
+
+    road_reset(ROAD_SEED);
+    road_update(1000.0f);
+    narrow = road_sample(950.0f);
+    blind = road_sample(500.0f);
+    plain = road_sample(450.0f);
+    CHECK(nearly(road_rail_limit(&narrow, +1),
+                 ROAD_ONE_LANE_TOTAL_DEFAULT * 0.5f + ROAD_SHOULDER_WIDTH -
+                     ROAD_RAIL_STOP, 0.02f)); /* 5.65 in the one-lane plateau */
+    CHECK(road_rail_limit(&narrow, -1) > 0.0f);
+    CHECK(nearly(road_rail_limit(&plain, +1),
+                 ROAD_EDGE_X - CAR_EDGE_MARGIN, 1e-4f)); /* no rail there */
+    CHECK(nearly(road_rail_limit(&blind, -1),
+                 ROAD_EDGE_X - ROAD_RAIL_STOP, 1e-3f));  /* blind span */
+    /* A sample between two spans reports 0 and falls back to the plain edge. */
+    {
+        road_sample_t gap = road_sample(2200.0f);
+
+        CHECK(gap.rail_limit_left == 0.0f);
+        CHECK(gap.rail_limit_right == 0.0f);
+        CHECK(nearly(road_rail_limit(&gap, -1),
+                     gap.edge_half_width - CAR_EDGE_MARGIN, 1e-5f));
+        CHECK(nearly(road_rail_limit(&gap, +1),
+                     gap.edge_half_width - CAR_EDGE_MARGIN, 1e-5f));
+    }
+
+    /* rail_enabled = false must zero the per-sample fields too, not just the
+     * segment bits (the narrow windows are a separate source). */
+    road_config_defaults(&c);
+    c.rail_enabled = false;
+    road_reset_config(ROAD_SEED, &c);
+    road_update(1000.0f);
+    narrow = road_sample(950.0f);
+    blind = road_sample(500.0f);
+    plain = road_sample(1300.0f);
+    CHECK(narrow.rail_limit_left == 0.0f);
+    CHECK(narrow.rail_limit_right == 0.0f);
+    CHECK(blind.rail_limit_left == 0.0f);
+    CHECK(plain.rail_limit_right == 0.0f);
+}
+
+static void test_rail_determinism_and_density(void)
+{
+    road_rail_span_t a[ROAD_RAIL_MAX_SPANS], b[ROAD_RAIL_MAX_SPANS];
+    road_config_t c;
+    int n1, n2, i;
+
+    road_reset(ROAD_SEED);
+    rail_entries(1000.0f, 400.0f, 2100.0f, a, &n1);
+    road_reset(ROAD_SEED);
+    rail_entries(1000.0f, 400.0f, 2100.0f, b, &n2);
+    CHECK(n1 == n2);
+    for (i = 0; i < n1; i++)
+        CHECK(a[i].s0 == b[i].s0 && a[i].s1 == b[i].s1 &&
+              a[i].side == b[i].side && a[i].kind == b[i].kind);
+
+    road_config_defaults(&c);
+    c.rail_density = 0.0f;
+    road_reset_config(ROAD_SEED, &c);
+    rail_entries(1000.0f, 400.0f, 2100.0f, a, &n1);
+    for (i = 0; i < n1; i++)
+        CHECK(!(a[i].kind & ROAD_RAIL_KIND_OUTSIDE));
+    CHECK(n1 >= 2); /* blind + narrow survive */
+
+    c.rail_enabled = false;
+    road_reset_config(ROAD_SEED, &c);
+    rail_entries(1000.0f, 400.0f, 2100.0f, a, &n1);
+    CHECK(n1 == 0);
+}
+
+static void test_rail_eligibility_per_map(void)
+{
+    road_config_t c;
+    road_rail_span_t s[ROAD_RAIL_MAX_SPANS];
+    int n, i;
+
+    /* HIGHWAY has no width events: no NARROW kind anywhere in 0..2000. */
+    road_config_defaults(&c);
+    c.map = ROAD_MAP_HIGHWAY;
+    road_reset_config(ROAD_SEED, &c);
+    road_update(1000.0f);
+    n = road_rail_collect(-200.0f, 2000.0f, s, ROAD_RAIL_MAX_SPANS);
+    for (i = 0; i < n; i++)
+        CHECK(!(s[i].kind & ROAD_RAIL_KIND_NARROW));
+    /* Every non-narrow rail is backed by a segment carrying that side, and
+     * every narrow rail covers a one-lane sample on both sides. */
+    for (i = 0; i < n; i++) {
+        if (s[i].kind & ROAD_RAIL_KIND_NARROW) {
+            road_sample_t mid = road_sample((s[i].s0 + s[i].s1) * 0.5f);
+
+            CHECK(mid.half_width <= ROAD_LANE_HALF_1 + 1e-3f);
+            CHECK(s[i].kind == ROAD_RAIL_KIND_NARROW);
+        } else {
+            int want = (s[i].side == -1) ? ROAD_RAIL_SIDE_LEFT
+                                         : ROAD_RAIL_SIDE_RIGHT;
+            int k;
+            int found = 0;
+
+            for (k = 0; k < road_segment_count(); k++) {
+                const road_segment_t *seg = road_segment_at(k);
+                float a = seg->start_s - ROAD_RAIL_LEAD;
+
+                if (!(seg->rail_side & want))
+                    continue;
+                if (a <= s[i].s0 + 0.2f && a >= s[i].s0 - ROAD_RAIL_TRAIL)
+                    found = 1;
+            }
+            CHECK(found);
+        }
+    }
+}
+
+static void test_rail_survives_rebase(void)
+{
+    road_rail_span_t before[ROAD_RAIL_MAX_SPANS], after[ROAD_RAIL_MAX_SPANS];
+    int nb, na, i;
+    float s;
+    float origin;
+
+    road_reset(ROAD_SEED);
+    for (s = 0.0f; s <= 2999.0f; s += 5.0f)
+        road_update(s);
+    CHECK(nearly(road_world_offset(), 0.0f, 1e-4f));
+    /* [2200, 2400] covers curve #8 (both sides, 2265.020..2344.287) and
+     * curve #9's unconditional blind inside rail (2354.629..2443.359, which
+     * the collector emits unclipped past the query end). */
+    nb = road_rail_collect(2200.0f, 2400.0f, before, ROAD_RAIL_MAX_SPANS);
+    CHECK(nb == 3);
+    CHECK(nearly(before[0].s0, 2265.020f, 0.2f) &&
+          nearly(before[0].s1, 2344.287f, 0.2f) && before[0].side == -1 &&
+          before[0].kind == ROAD_RAIL_KIND_INSIDE);
+    CHECK(nearly(before[1].s0, 2265.020f, 0.2f) &&
+          nearly(before[1].s1, 2344.287f, 0.2f) && before[1].side == +1 &&
+          before[1].kind == ROAD_RAIL_KIND_OUTSIDE);
+    CHECK(nearly(before[2].s0, 2354.629f, 0.2f) &&
+          nearly(before[2].s1, 2443.359f, 0.2f) && before[2].side == -1 &&
+          before[2].kind == ROAD_RAIL_KIND_INSIDE);
+
+    s = road_update(3400.0f);
+    origin = 3400.0f - s;                  /* 2400: the 80 m-aligned re-base */
+    CHECK(nearly(s, 1000.0f, 1e-3f));
+    CHECK(nearly(road_world_offset(), origin, 1e-3f));
+    na = road_rail_collect(2200.0f - origin, 2400.0f - origin, after,
+                           ROAD_RAIL_MAX_SPANS);
+    CHECK(na == nb);
+    for (i = 0; i < na; i++) {
+        CHECK(nearly(after[i].s0 + origin, before[i].s0, 0.05f));
+        CHECK(nearly(after[i].s1 + origin, before[i].s1, 0.05f));
+        CHECK(after[i].side == before[i].side);
+        CHECK(after[i].kind == before[i].kind);
+    }
+}
+
+static void test_rail_survives_backward_generation(void)
+{
+    road_rail_span_t f[ROAD_RAIL_MAX_SPANS], r1[ROAD_RAIL_MAX_SPANS],
+                     r2[ROAD_RAIL_MAX_SPANS];
+    int nf, n1, n2, i;
+    float s;
+
+    /* Forward rail in the ring, then reverse past the start. */
+    road_reset(ROAD_SEED);
+    for (s = 0.0f; s <= 400.0f; s += 5.0f)
+        road_update(s);
+    nf = road_rail_collect(400.0f, 600.0f, f, ROAD_RAIL_MAX_SPANS);
+    CHECK(nf >= 1);                        /* blind span 482.856..597.589 */
+    for (s = 400.0f; s >= -600.0f; s -= 5.0f)
+        road_update(s);
+    CHECK(road_segment_at(0)->start_s < -600.0f);
+    n1 = road_rail_collect(400.0f, 600.0f, r1, ROAD_RAIL_MAX_SPANS);
+    CHECK(n1 == nf);
+    for (i = 0; i < n1; i++)
+        CHECK(nearly(r1[i].s0, f[i].s0, 0.05f) &&
+              nearly(r1[i].s1, f[i].s1, 0.05f));
+    /* Backward-generated road also gets rails (its own stream, deterministic). */
+    n2 = road_rail_collect(-600.0f, 0.0f, r2, ROAD_RAIL_MAX_SPANS);
+    CHECK(n2 >= 1);
+    road_reset(ROAD_SEED);
+    for (s = 0.0f; s <= 400.0f; s += 5.0f)
+        road_update(s);
+    for (s = 400.0f; s >= -600.0f; s -= 5.0f)
+        road_update(s);
+    nf = road_rail_collect(-600.0f, 0.0f, f, ROAD_RAIL_MAX_SPANS);
+    CHECK(nf == n2);
+    for (i = 0; i < n2; i++)
+        CHECK(f[i].s0 == r2[i].s0 && f[i].s1 == r2[i].s1 &&
+              f[i].side == r2[i].side);
+}
+
+static road_sample_t rail_road(int side) /* side: -1 left, +1 right */
+{
+    road_sample_t r = flat_road(0.0f);
+    float limit = ROAD_EDGE_X - CAR_RAIL_MARGIN;   /* 8.45 */
+
+    if (side > 0)
+        r.rail_limit_right = limit;
+    else if (side < 0)
+        r.rail_limit_left = limit;
+    return r;
+}
+
+/*
+ * Wide on-road fixture for the scrub-count check: lateral 8.65 stays inside
+ * the 9.0 m asphalt, so the 16.5 m/s off-road cap cannot hide a second scrub.
+ */
+static road_sample_t rail_road_wide(int side)
+{
+    road_sample_t r = flat_road(0.0f);
+
+    r.half_width = 20.0f;   /* never off-road, so the 16.5 m/s cap stays out */
+    r.edge_half_width = 20.6f;
+    if (side > 0)
+        r.rail_limit_right = ROAD_EDGE_X - CAR_RAIL_MARGIN;
+    else if (side < 0)
+        r.rail_limit_left = ROAD_EDGE_X - CAR_RAIL_MARGIN;
+    return r;
+}
+
+static void test_rail_clamp_and_single_scrub(void)
+{
+    road_sample_t railed = rail_road(+1);
+    road_sample_t open = flat_road(0.0f);
+    car_state_t a, b, c;
+    car_input_t in = {true, false, 1.0f, 0.0f};
+    int i;
+
+    car_reset(&a);
+    car_reset(&b);
+    a.speed = b.speed = 30.0f;
+    a.lateral = b.lateral = 8.65f;
+    a.steer = b.steer = 1.0f;
+
+    car_step(&a, &in, 1.0f / 60.0f, &railed);
+    car_step(&b, &in, 1.0f / 60.0f, &open);
+    CHECK(nearly(a.lateral, 8.45f, 1e-4f));
+    CHECK(b.lateral > 8.65f && b.lateral <= CAR_LATERAL_LIMIT);
+    CHECK(nearly(a.speed, b.speed * (1.0f - CAR_RAIL_SCRUB), 1e-3f));
+    CHECK(a.slip == 0.0f);             /* yaw into the wall zeroed */
+    CHECK(b.slip > 0.0f);
+    CHECK(car_is_rail_hit(&a));
+    CHECK(car_rail_side(&a) == 1);
+    CHECK(!car_is_rail_hit(&b));
+
+    /* 40 pinned steps against an identical car that never sees a rail:
+     * one scrub leaves speed_a/speed_c ~0.88, two would leave ~0.78. */
+    {
+        road_sample_t railed_wide = rail_road_wide(+1);
+        road_sample_t open_wide = rail_road_wide(0);
+
+        car_reset(&a);
+        car_reset(&c);
+        a.speed = c.speed = 30.0f;
+        a.lateral = c.lateral = 8.65f;
+        a.steer = c.steer = 1.0f;
+        for (i = 0; i < 40; i++) {
+            a.lateral = 8.65f;
+            car_step(&a, &in, 1.0f / 60.0f, &railed_wide);
+            car_step(&c, &in, 1.0f / 60.0f, &open_wide);
+        }
+    }
+    CHECK(a.speed > 0.85f * c.speed);
+    CHECK(a.speed < 0.95f * c.speed);
+    CHECK(car_is_rail_hit(&a));
+}
+
+static void test_rail_latch_decays(void)
+{
+    road_sample_t railed = rail_road(+1);
+    road_sample_t open = flat_road(0.0f);
+    car_state_t car;
+    car_input_t coast = {false, false, 0.0f, 0.0f};
+    int i;
+
+    car_reset(&car);
+    car.speed = 20.0f;
+    car.lateral = 8.65f;
+    car.steer = 1.0f;
+    car_step(&car, &coast, 1.0f / 60.0f, &railed);
+    CHECK(car_is_rail_hit(&car));
+    CHECK(car_rail_side(&car) == 1);
+    car.lateral = 0.0f;
+    for (i = 0; i < 20; i++)                         /* 0.333 s < 0.35 s */
+        car_step(&car, &coast, 1.0f / 60.0f, &open);
+    CHECK(car_is_rail_hit(&car));
+    /* The side must survive the whole latch: the HUD flash picks its screen
+     * edge from car_rail_side(), so clearing it on the first non-contact frame
+     * would move a left hit's flash to the right edge while it decays. */
+    CHECK(car_rail_side(&car) == 1);
+    for (i = 0; i < 2; i++)                          /* 0.367 s */
+        car_step(&car, &coast, 1.0f / 60.0f, &open);
+    CHECK(!car_is_rail_hit(&car));
+    CHECK(car_rail_side(&car) == 0);
+}
+
+static void test_rail_left_side_and_reverse(void)
+{
+    road_sample_t left = rail_road(-1);
+    road_sample_t right = rail_road(+1);
+    road_sample_t open = flat_road(0.0f);
+    car_state_t a, b;
+    car_input_t back = {false, true, 0.0f, 0.0f};
+    int i;
+
+    car_reset(&a);
+    car_reset(&b);
+    a.lateral = b.lateral = -8.65f;
+    a.speed = b.speed = 12.0f;
+    a.steer = b.steer = -1.0f;
+    car_step(&a, &back, 1.0f / 60.0f, &left);
+    CHECK(nearly(a.lateral, -8.45f, 1e-4f));
+    CHECK(a.slip == 0.0f);
+    CHECK(car_rail_side(&a) == -1);
+    /* Left hit, steered away: the latch keeps reporting the left side. */
+    a.lateral = 0.0f;
+    for (i = 0; i < 6; i++)
+        car_step(&a, &back, 1.0f / 60.0f, &open);
+    CHECK(car_is_rail_hit(&a));
+    CHECK(car_rail_side(&a) == -1);
+
+    /* Reverse contact scrubs the same 15 % of |speed| (6 m/s is inside the
+     * CAR_MAX_REVERSE_SPEED clamp). */
+    b.speed = -6.0f;
+    b.lateral = 8.65f;
+    car_step(&b, &back, 1.0f / 60.0f, &right);
+    CHECK(b.lateral <= 8.45f + 1e-4f);
+    CHECK(b.speed < 0.0f);
+    CHECK(nearly(b.speed, -6.0f * 0.85f, 0.2f));
+}
+
+static void test_rail_absent_leaves_cornering_unchanged(void)
+{
+    road_sample_t open = flat_road(0.0f);
+    car_state_t a, b, c;
+    car_input_t in = {true, false, 1.0f, 0.0f};
+
+    /* Two cars that both clamp on the plain edge: no rail, no scrub, no latch,
+     * and the speeds stay bit-identical. */
+    car_reset(&a);
+    car_reset(&b);
+    a.speed = b.speed = 30.0f;
+    a.lateral = 9.30f;
+    b.lateral = 9.29f;
+    car_step(&a, &in, 1.0f / 60.0f, &open);
+    car_step(&b, &in, 1.0f / 60.0f, &open);
+    CHECK(nearly(a.lateral, CAR_LATERAL_LIMIT, 1e-4f));
+    CHECK(a.speed == b.speed);            /* no rail, no scrub */
+    CHECK(!car_is_rail_hit(&a));
+    CHECK(a.rail_hold == 0.0f);
+    CHECK(a.rail_side == 0);
+
+    /* The plain-edge clamp must NOT zero the yaw: that is rail-only. */
+    car_reset(&c);
+    c.speed = 30.0f;
+    c.lateral = 9.30f;
+    c.slip = 0.30f;
+    c.steer = 1.0f;
+    car_step(&c, &in, 1.0f / 60.0f, &open);
+    CHECK(nearly(c.lateral, CAR_LATERAL_LIMIT, 1e-4f));
+    CHECK(c.slip > 0.0f);                 /* preserved, exactly as today */
+    CHECK(!car_is_rail_hit(&c));
+
+    /* A latched rail decay must not be refreshed by plain-edge contact. */
+    {
+        road_sample_t railed = flat_road(0.0f);
+
+        railed.rail_limit_right = ROAD_EDGE_X - CAR_RAIL_MARGIN;
+        car_reset(&c);
+        c.speed = 20.0f;
+        c.lateral = 8.65f;
+        c.steer = 1.0f;
+        car_step(&c, &in, 1.0f / 60.0f, &railed);
+        CHECK(car_is_rail_hit(&c));
+        c.lateral = 9.3f;                 /* now on the plain edge */
+        car_step(&c, &in, 1.0f / 60.0f, &open);
+        CHECK(c.rail_hold < CAR_RAIL_HOLD - 1e-6f); /* decays, not refreshed */
+    }
+}
+
 int main(void)
 {
     test_initial_state();
@@ -2249,6 +2734,19 @@ int main(void)
     test_road_long_drive_keeps_coordinates_bounded();
     test_road_rebase_preserves_distance();
     test_road_rebase_step_keeps_periods();
+    test_rail_config_defaults();
+    test_rail_limit_fallback();
+    test_rail_limit_never_widens();
+    test_rail_spans_at_seed();
+    test_rail_limits_follow_spans();
+    test_rail_determinism_and_density();
+    test_rail_eligibility_per_map();
+    test_rail_survives_rebase();
+    test_rail_survives_backward_generation();
+    test_rail_clamp_and_single_scrub();
+    test_rail_latch_decays();
+    test_rail_left_side_and_reverse();
+    test_rail_absent_leaves_cornering_unchanged();
 
     if (failures) {
         fprintf(stderr, "%d test(s) failed\n", failures);

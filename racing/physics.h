@@ -60,6 +60,11 @@
 #define CAR_BOOST_GRIP 0.20f
 #define CAR_BOOST_YAW 0.10f
 
+/* Guardrail contact: rail-only effects, never applied at the plain road edge. */
+#define CAR_RAIL_MARGIN ROAD_RAIL_STOP /* wheel half-width; clamp = edge - it */
+#define CAR_RAIL_SCRUB 0.15f           /* one-off speed loss on first contact */
+#define CAR_RAIL_HOLD 0.35f            /* flash latch, seconds */
+
 typedef struct {
     float s;        /* distance along the centreline */
     float lateral;  /* offset from the road centreline, + = right */
@@ -80,6 +85,9 @@ typedef struct {
     float susp_vel;             /* m/s */
     float pitch;                /* rad, + nose up */
     bool airborne;
+    float rail_hold;            /* seconds of rail-contact flash left, >= 0 */
+    signed char rail_side;      /* last rail contact: -1 left, +1 right, 0 none */
+    bool rail_contact;          /* rail contact on the previous step */
 } car_state_t;
 
 typedef struct {
@@ -97,5 +105,9 @@ float car_kmh(const car_state_t *car);
 
 bool car_is_offroad(const car_state_t *car);
 bool car_is_slipping(const car_state_t *car);
+
+/* Rail-contact indication: latched for CAR_RAIL_HOLD after a real rail hit. */
+bool car_is_rail_hit(const car_state_t *car);
+int car_rail_side(const car_state_t *car); /* -1 left, 0 none, +1 right */
 
 #endif /* RACING_PHYSICS_H */

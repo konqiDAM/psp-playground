@@ -10,6 +10,10 @@ add_executable(psp_racing
     menu.c
     welcome.c
     storage.c
+    assets/roadsigns/signs.c
+    assets/roadsigns/signs_gu.c
+    assets/guardrail/guardrail.c
+    assets/guardrail/guardrail_gu.c
     ../src/font.c
 )
 
