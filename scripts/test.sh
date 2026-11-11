@@ -60,8 +60,34 @@ cc -std=c99 -Wall -Wextra -Werror -Iwifi \
 ./build/host/test_wifi_app
 
 cc -std=c99 -Wall -Wextra -Werror -Iracing \
-   tests/test_racing_ui.c racing/settings.c racing/input.c racing/telemetry.c racing/minimap.c racing/menu.c racing/road.c racing/welcome.c -lm \
+   tests/test_racing_score.c racing/score.c racing/hiscore.c \
+   racing/settings.c racing/road.c -lm \
+   -o build/host/test_racing_score
+./build/host/test_racing_score
+
+cc -std=c99 -Wall -Wextra -Werror -Iracing \
+   tests/test_racing_ui.c racing/settings.c racing/input.c racing/telemetry.c racing/minimap.c racing/menu.c racing/road.c racing/welcome.c racing/hiscore.c -lm \
    -o build/host/test_racing_ui
 ./build/host/test_racing_ui
+
+cc -std=c99 -Wall -Wextra -Werror -Iracing \
+   tests/test_racing_signs.c racing/assets/roadsigns/signs.c -lm \
+   -o build/host/test_racing_signs
+./build/host/test_racing_signs
+
+# racing/storage.c is PSP-only I/O, so it is tested with a TEST-ONLY shim
+# (tests/host/psp/) that maps ms0: onto a temporary directory and injects the
+# failures a memory stick produces. -Itests/host is for "psp/psp_stub.h"; the
+# stub's own headers come from -Itests/host/psp.
+cc -std=c99 -Wall -Wextra -Werror -Iracing -Itests/host -Itests/host/psp \
+   tests/test_racing_storage.c racing/storage.c racing/settings.c \
+   racing/hiscore.c tests/host/psp/psp_stub.c \
+   -o build/host/test_racing_storage
+./build/host/test_racing_storage
+
+cc -std=c99 -Wall -Wextra -Werror -Iracing \
+   tests/test_racing_rail.c racing/assets/guardrail/guardrail.c -lm \
+   -o build/host/test_racing_rail
+./build/host/test_racing_rail
 
 

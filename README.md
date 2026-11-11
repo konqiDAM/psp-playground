@@ -10,7 +10,7 @@ are the optional 144×80 PBP menu icons.
 |---|---|
 | **Snake** | Classic 2D snake game on a 30×15 grid |
 | **Cube 3D** | Rotating textured cube (`sceGu` + `pspgum`) |
-| **Racing 3D** | Endless driving game with selectable maps, terrain sliders, crest jumps, HUD and minimap |
+| **Racing 3D** | Driving game with selectable maps, terrain sliders, crest jumps, a 60-second Time Attack with per-map leaderboards, roadside warning signs, guardrails, and a 250 m minimap ribbon |
 | **WiFi Connection** | Saved Wi-Fi profiles, full link status, probes, netconf, and resumable LAN downloads |
 | **WiFi Test** | Low-level connect/status diagnostic |
 | **Memory Test** | Start-to-end user-RAM diagnostic with PASS/FAIL |
