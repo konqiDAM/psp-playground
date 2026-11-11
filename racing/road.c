@@ -114,6 +114,41 @@ static float width_phase(void)
            road_width_cycle_length(&active_config);
 }
 
+int road_sight_visible(const float *h, int n, float eye_pos, float step,
+                       float eye_y, float lift, float margin, bool *out)
+{
+    float max_slope = -1e30f;
+    int visible = 0;
+    int i;
+
+    if (!h || !out || n <= 0 || !isfinite(step) || !isfinite(eye_y) ||
+        !isfinite(eye_pos) || step <= 0.0f) {
+        for (i = 0; out && i < n; i++)
+            out[i] = false;
+        return 0;
+    }
+
+    for (i = 0; i < n; i++) {
+        float rel = ((float)i - eye_pos) * step;
+
+        if (rel <= 0.0f) {
+            out[i] = true; /* at or behind the camera: clipped, never culled */
+            visible++;
+            continue;
+        }
+        out[i] = (h[i] + lift - eye_y) / rel >= max_slope;
+        if (out[i])
+            visible++;
+        {
+            float occluder = (h[i] + margin - eye_y) / rel;
+
+            if (occluder > max_slope)
+                max_slope = occluder;
+        }
+    }
+    return visible;
+}
+
 void road_config_defaults(road_config_t *cfg)
 {
     if (!cfg)

@@ -3212,6 +3212,134 @@ static void test_car_step_exposes_ds(void)
     CHECK(car.ds < 0.0f);
 }
 
+/* ------------------------------------------------------- sight-line cull */
+
+static void test_road_sight_visible_flat_is_all_visible(void)
+{
+    float h[16] = {0};
+    bool out[16];
+    int i;
+
+    CHECK(road_sight_visible(h, 16, 0.0f, ROAD_SIGHT_STEP, 3.43f,
+                             ROAD_DASH_LIFT, ROAD_SIGHT_MARGIN, out) == 16);
+    for (i = 0; i < 16; i++)
+        CHECK(out[i]);
+}
+
+static void test_road_sight_visible_rising_is_all_visible(void)
+{
+    /* a constant 12 % climb: the sight line steepens towards the same 12 %, so
+     * no point is ever below it. This is the UPHILL map's normal profile; a
+     * sign flip or an over-eager max_slope update would cull it. */
+    float h[24];
+    bool out[24];
+    int i;
+
+    for (i = 0; i < 24; i++)
+        h[i] = 0.6f * (float)i;
+    CHECK(road_sight_visible(h, 24, 0.0f, ROAD_SIGHT_STEP, 3.43f,
+                             ROAD_DASH_LIFT, ROAD_SIGHT_MARGIN, out) == 24);
+    for (i = 0; i < 24; i++)
+        CHECK(out[i]);
+}
+
+static void test_road_sight_visible_crest_hides_past_the_lip(void)
+{
+    /* rise 5 m then fall: the lip is index 6 */
+    const float h[9] = {0.0f, 0.6f, 1.2f, 1.8f, 2.4f, 2.9f, 3.2f, 3.0f, 2.4f};
+    const bool expect[9] = {true, true, true, true, true, true, true,
+                            false, false};
+    bool out[9];
+    int i;
+
+    CHECK(road_sight_visible(h, 9, 0.0f, ROAD_SIGHT_STEP, 3.2f,
+                             ROAD_DASH_LIFT, ROAD_SIGHT_MARGIN, out) == 7);
+    for (i = 0; i < 9; i++)
+        CHECK(out[i] == expect[i]);
+}
+
+static void test_road_sight_visible_eye_pos_marks_the_past(void)
+{
+    /* same profile, eye at lattice index 4: 0..4 are behind the camera, so the
+     * scan starts at 5 (5 and 6 are visible, 7 and 8 fall behind the lip) */
+    const float h[9] = {0.0f, 0.6f, 1.2f, 1.8f, 2.4f, 2.9f, 3.2f, 3.0f, 2.4f};
+    bool out[9];
+    int i;
+
+    CHECK(road_sight_visible(h, 9, 4.0f, ROAD_SIGHT_STEP, 3.2f,
+                             ROAD_DASH_LIFT, ROAD_SIGHT_MARGIN, out) == 7);
+    for (i = 0; i <= 6; i++)
+        CHECK(out[i]);
+    CHECK(!out[7] && !out[8]);
+}
+
+static void test_road_sight_visible_uses_the_fractional_eye(void)
+{
+    /* eye mid-step (eye_pos 0.5): index 3 clears the index-2 occluder with the
+     * true origin, and the same array culls it when the origin is rounded down
+     * to 0. This pins the renderer's (eye_s - base) / step convention and
+     * fails if eye_pos is truncated to an integer. */
+    const float h[4] = {0.0f, 0.0f, 0.64f, 0.5f};
+    bool out[4];
+
+    (void)road_sight_visible(h, 4, 0.5f, ROAD_SIGHT_STEP, 1.0f,
+                             ROAD_DASH_LIFT, ROAD_SIGHT_MARGIN, out);
+    CHECK(out[3]);
+    (void)road_sight_visible(h, 4, 0.0f, ROAD_SIGHT_STEP, 1.0f,
+                             ROAD_DASH_LIFT, ROAD_SIGHT_MARGIN, out);
+    CHECK(!out[3]);
+}
+
+static void test_road_sight_visible_margin_and_boundary(void)
+{
+    /* the line from the eye to index 2 passes index 1 at exactly 0.75 m,
+     * with h[1] = 0.74 m: 0.01 m of clearance */
+    const float graze[3] = {0.0f, 0.74f, 0.5f};
+    /* and an exact boundary case: the target sits ON the occluder line */
+    const float edge[3] = {0.0f, 0.75f, 0.5f};
+    bool out[3];
+
+    (void)road_sight_visible(graze, 3, 0.0f, ROAD_SIGHT_STEP, 1.0f, 0.0f, 0.0f,
+                             out);
+    CHECK(out[1] && out[2]);                         /* clear without margin */
+    (void)road_sight_visible(graze, 3, 0.0f, ROAD_SIGHT_STEP, 1.0f, 0.0f, 0.05f,
+                             out);
+    CHECK(out[1]);                                   /* no intermediate point:
+                                                      * always visible         */
+    CHECK(!out[2]);                                  /* 0.74 + 0.05 > 0.75: the
+                                                      * margin closes the graze */
+    /* equal slopes are VISIBLE: a `>` regression would cull this point */
+    (void)road_sight_visible(edge, 3, 0.0f, ROAD_SIGHT_STEP, 1.0f, 0.0f, 0.0f,
+                             out);
+    CHECK(out[2]);
+    /* a broken step is rejected instead of dividing by zero */
+    CHECK(road_sight_visible(graze, 3, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, out)
+          == 0);
+}
+
+static void test_road_sight_lattice_budget(void)
+{
+    /* n is the base lattice point plus every 5 m point up to car +
+     * ROAD_DASH_AHEAD. It depends only on the phase of the eye position, so
+     * the sweep runs over car_s at 0.5 m and speed 0..55 m/s (the eye sits at
+     * car - (8.2 + 0.035*v)). Measured worst 28; the constant is 32. */
+    int worst = 0;
+
+    for (float car_s = 50.0f; car_s < 3000.0f; car_s += 0.5f) {
+        for (float v = 0.0f; v <= 55.0f; v += 5.0f) {
+            float eye_s = car_s - (8.2f + 0.035f * v);
+            float base = floorf(eye_s / ROAD_SIGHT_STEP) * ROAD_SIGHT_STEP;
+            int n = (int)floorf((car_s + ROAD_DASH_AHEAD - base) /
+                                ROAD_SIGHT_STEP) + 1;
+
+            if (n > worst)
+                worst = n;
+        }
+    }
+    CHECK(worst >= 20);                       /* the sweep really ran     */
+    CHECK(worst <= ROAD_SIGHT_MAX_POINTS);    /* measured 28, budget 32   */
+}
+
 int main(void)
 {
     test_initial_state();
@@ -3325,6 +3453,13 @@ int main(void)
     test_rail_absent_leaves_cornering_unchanged();
     test_rail_clamp_at_the_asphalt_edge();
     test_car_step_exposes_ds();
+    test_road_sight_visible_flat_is_all_visible();
+    test_road_sight_visible_rising_is_all_visible();
+    test_road_sight_visible_crest_hides_past_the_lip();
+    test_road_sight_visible_eye_pos_marks_the_past();
+    test_road_sight_visible_uses_the_fractional_eye();
+    test_road_sight_visible_margin_and_boundary();
+    test_road_sight_lattice_budget();
 
     if (failures) {
         fprintf(stderr, "%d test(s) failed\n", failures);

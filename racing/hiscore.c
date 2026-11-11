@@ -8,6 +8,7 @@
 
 #include "hiscore.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -392,6 +393,61 @@ int hiscore_commit(hiscore_book_t *book, const hiscore_entry_t *e,
     if (needs_save)
         *needs_save = rank > 0;
     return rank;
+}
+
+/* ------------------------------------------------------------- 0.9.0 rules */
+
+static bool near(float value, float target, float eps)
+{
+    if (!isfinite(value))
+        return false;
+    return fabsf(value - target) <= eps;
+}
+
+bool hiscore_run_eligible(const road_config_t *terrain)
+{
+    if (!terrain)
+        return false;
+    if (!near(terrain->elevation_pct, ROAD_TERRAIN_DEFAULT_PCT,
+              HISCORE_TERRAIN_PCT_EPS))
+        return false;
+    if (!near(terrain->hill_pct, ROAD_TERRAIN_DEFAULT_PCT,
+              HISCORE_TERRAIN_PCT_EPS))
+        return false;
+    if (!near(terrain->width_pct, ROAD_TERRAIN_DEFAULT_PCT,
+              HISCORE_TERRAIN_PCT_EPS))
+        return false;
+    if (!near(terrain->one_lane_width, ROAD_ONE_LANE_TOTAL_DEFAULT,
+              HISCORE_TERRAIN_ONE_LANE_EPS))
+        return false;
+    return true;
+}
+
+int hiscore_commit_run(hiscore_book_t *book, hiscore_result_t *out,
+                       float distance_m, uint32_t seed,
+                       const road_config_t *terrain, int year, int month,
+                       int day, bool *needs_save)
+{
+    if (needs_save)
+        *needs_save = false;
+    if (!out)
+        return 0;
+    hiscore_entry_from_run(&out->entry, distance_m, seed, terrain, year, month,
+                           day);
+    out->eligible = hiscore_run_eligible(terrain);
+    if (!out->eligible) {
+        out->rank = 0;
+        return 0;
+    }
+    out->rank = hiscore_commit(book, &out->entry, needs_save);
+    return out->rank;
+}
+
+const char *hiscore_ineligible_reason(const hiscore_result_t *out)
+{
+    if (!out || out->eligible)
+        return NULL;
+    return "CUSTOM TERRAIN";
 }
 
 bool hiscore_dirty_after(bool dirty, bool attempted, bool save_ok)

@@ -183,6 +183,13 @@ int main(void)
                 road_reset_config(run_seed, &terrain);
                 reset_run_state(&car, &telemetry, &shaper, &menu, &warnings,
                                 &steer_bar, &suppress, &menu_was_open);
+#ifdef RACING_DIAG_START_S
+                /* Diagnostic only: begin the run at a chosen centreline point
+                 * so the dash probe can approach a crest from a known distance
+                 * at a low speed. Never defined in a release build. */
+                car.s = (float)RACING_DIAG_START_S;
+                (void)road_update(car.s);
+#endif
                 score_reset(&score,
                             welcome.mode == WELCOME_MODE_FREE_DRIVE);
                 result_done = false;
@@ -193,7 +200,7 @@ int main(void)
             continue;
         }
 
-        if (score_finished(&score) && !menu.open) {
+        if (score_result_ready(&score) && !suppress && !menu.open) {
             if (pressed & PSP_CTRL_START) {
                 mode = 0;
                 welcome_restart(&welcome);
@@ -246,13 +253,18 @@ int main(void)
         }
 
         if (!menu.open) {
-            bool controls = !score_finished(&score);
+            bool controls = !score_finished(&score);   /* throttle gate */
+            bool card_up = score_result_ready(&score); /* gameplay-input gate */
 
             raw.left = (pad.Buttons & PSP_CTRL_LEFT) != 0;
             raw.right = (pad.Buttons & PSP_CTRL_RIGHT) != 0;
             raw.nub_lx = (int)pad.Lx;
-            raw.brake = (pad.Buttons & PSP_CTRL_SQUARE) != 0 && !suppress;
-            input_gate_raw(&raw, controls, settings.analog_centre);
+            /* 0.9.0: the brake stays live through the coast but is cut at
+             * rest, or physics.c would turn it into reverse. */
+            raw.brake = (pad.Buttons & PSP_CTRL_SQUARE) != 0 && !suppress &&
+                        score_brake_allowed(&score, car.speed);
+            /* Steering stays live in COASTING; only the card closes it. */
+            input_gate_raw(&raw, !card_up, settings.analog_centre);
 
             input.throttle = controls &&
                              (pad.Buttons & PSP_CTRL_CROSS) != 0 && !suppress;
@@ -271,27 +283,33 @@ int main(void)
             telemetry_step(&telemetry, &car, dt);
 
             score_step(&score, input.throttle, car.ds, dt);
+            score_coast_step(&score, car.speed, car.airborne, dt);
 
-            if (score_finished(&score) && !result_done) {
+            if (score_result_ready(&score) && !result_done) {
                 int year = 0;
                 int month = 0;
                 int day = 0;
 
                 storage_read_date(&year, &month, &day);
-                hiscore_entry_from_run(&result.entry, score.distance_m,
-                                       run_seed, &terrain, year, month, day);
                 {
                     bool needs_save = false;
                     bool saved_ok = false;
 
-                    result.rank = hiscore_commit(&hiscore, &result.entry,
-                                                 &needs_save);
+                    /* Eligibility is part of the commit: a non-default
+                     * terrain run is never inserted and needs_save stays
+                     * false, so RACING.HOF cannot change. */
+                    result.rank = hiscore_commit_run(
+                        &hiscore, &result, score.distance_m, run_seed, &terrain,
+                        year, month, day, &needs_save);
                     if (needs_save)
                         saved_ok = storage_save_hiscore(&hiscore);
                     hiscore_dirty = hiscore_dirty_after(hiscore_dirty,
                                                         needs_save, saved_ok);
                     hiscore_save_failed = hiscore_dirty;
                 }
+                /* The card is up: a CROSS held right now must not fire the
+                 * retry - the existing suppress release-then-press guard. */
+                suppress = true;
                 result_done = true;
             }
         }

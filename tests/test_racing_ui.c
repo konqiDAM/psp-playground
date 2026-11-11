@@ -827,11 +827,33 @@ static void test_telemetry_longitudinal_g(void)
     telemetry_state_t t;
     car_state_t car = {0};
 
-    car.long_accel = 9.80665f;
+    car.long_accel = 9.80665f;          /* accelerating */
     telemetry_reset(&t);
     telemetry_steps(&t, &car, 60);
-    CHECK(nearly(t.lon_g, 1.0f, 0.01f));
-    CHECK(nearly(t.peak_g, 1.0f, 0.01f));
+    CHECK(nearly(t.lon_g, -1.0f, 0.01f)); /* negative => the dot goes DOWN */
+    CHECK(nearly(t.peak_g, 1.0f, 0.01f)); /* peak is a magnitude */
+
+    car.long_accel = -19.6133f;         /* braking, 2 g */
+    telemetry_reset(&t);
+    telemetry_steps(&t, &car, 60);
+    CHECK(nearly(t.lon_g, 2.0f, 0.01f)); /* positive => the dot goes UP */
+    CHECK(nearly(t.peak_g, 2.0f, 0.01f));
+    CHECK(t.peak_g > 0.0f);
+}
+
+/* Reverse reads POSITIVE under the -d(speed)/dt convention: throttling
+ * backwards is a negative speed change, so lon_g = +0.714 and the dot moves
+ * up. Documented consequence of the sign flip, not an accident. */
+static void test_telemetry_reverse_reads_positive(void)
+{
+    telemetry_state_t t;
+    car_state_t car = {0};
+
+    car.long_accel = -7.0f;             /* CAR_REVERSE_ACCEL backwards */
+    telemetry_reset(&t);
+    telemetry_steps(&t, &car, 60);
+    CHECK(nearly(t.lon_g, 7.0f / 9.80665f, 0.01f));
+    CHECK(nearly(t.peak_g, 7.0f / 9.80665f, 0.01f));
 }
 
 static void test_telemetry_peak_hold(void)
@@ -1684,6 +1706,7 @@ int main(void)
     test_telemetry_reset();
     test_telemetry_lateral_g();
     test_telemetry_longitudinal_g();
+    test_telemetry_reverse_reads_positive();
     test_telemetry_peak_hold();
     test_telemetry_distance_and_max();
     test_telemetry_dt_zero();

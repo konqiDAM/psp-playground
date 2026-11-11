@@ -15,9 +15,13 @@
 #define TELEMETRY_RANGE_G 2.5f  /* full-scale dot radius */
 
 typedef struct {
-    float lat_g;      /* smoothed, signed */
-    float lon_g;      /* smoothed, signed */
-    float peak_g;     /* max hypot(lat, lon) since reset */
+    float lat_g;      /* smoothed, signed: + = right turn */
+    float lon_g;      /* smoothed, signed: + = BRAKING (dot up),
+                       *                   - = accelerating (dot down).
+                       * One sign for the dot, the LON readout and probes:
+                       * lon_g = -long_accel / TELEMETRY_G, so reverse (a
+                       * negative speed change) reads positive. */
+    float peak_g;     /* max hypot(lat, lon) since reset: a magnitude */
     float distance_m; /* odometer, + = driven distance */
     float max_speed;  /* m/s, forward maximum since reset */
 } telemetry_state_t;

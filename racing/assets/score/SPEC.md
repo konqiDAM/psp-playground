@@ -38,14 +38,15 @@ mode/map/sliders.
 ## 2. Timer state machine (`racing/score.c`)
 
 ```
-states: IDLE (not started) | RUNNING | FINISHED | FREE (Free Drive, inert)
+states: IDLE (not started) | RUNNING | COASTING (clock latched, car rolling)
+        | RESULT (at rest: the card may show) | FREE (Free Drive, inert)
 
 score_reset(r, free):
     state   = free ? FREE : IDLE
-    elapsed_s = 0 ; distance_m = 0
+    elapsed_s = 0 ; distance_m = 0 ; rest_s = 0
 
 score_step(r, throttle, ds, dt):
-    if state == FREE or dt <= 0:      return      # zero-length frame is a no-op
+    if state in (FREE, COASTING, RESULT) or dt <= 0:  return  # latched/inert
     if state == IDLE:
         if not throttle:              return      # idling is free
         state = RUNNING                            # throttle start edge
@@ -54,13 +55,32 @@ score_step(r, throttle, ds, dt):
         elapsed_s += dt
         if elapsed_s >= SCORE_RUN_SECONDS:
             elapsed_s = SCORE_RUN_SECONDS
-            state = FINISHED
-    # FINISHED: no tick, no accumulation
+            state = COASTING                       # 0.9.0: not FINISHED
+    # COASTING / RESULT: no tick, no accumulation
+
+score_coast_step(r, speed, airborne, dt):
+    if state != COASTING or dt <= 0:  return
+    if airborne or |speed| > SCORE_REST_SPEED_MPS: rest_s = 0
+    else:                                          rest_s += dt
+    if rest_s >= SCORE_REST_HOLD_S:  state = RESULT
+
+score_brake_allowed(r, speed):
+    state != COASTING            -> true
+    state == COASTING            -> speed > SCORE_REST_SPEED_MPS
 
 score_remaining(r): FREE -> 0 ; IDLE -> SCORE_RUN_SECONDS ;
+                    COASTING/RESULT -> 0 ;
                     else max(0, SCORE_RUN_SECONDS - elapsed_s)
-score_finished(r):  state == FINISHED
+score_finished(r):     state in (COASTING, RESULT)
+score_result_ready(r): state == RESULT
 ```
+
+0.9.0 constants: `SCORE_REST_SPEED_MPS` = 0.556 (2 km/h) and
+`SCORE_REST_HOLD_S` = 0.3. The brake gate exists because `physics.c` turns a
+held SQUARE into reverse once the speed reaches 0; without it a player holding
+the brake at rest can never reach the latch (measured: no rest in 6 s at
+-8 m/s). Airborne at the latch resets `rest_s`, so a crest launch at the
+finish waits for landing *and* rest.
 
 Rules:
 

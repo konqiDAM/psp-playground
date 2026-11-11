@@ -41,7 +41,11 @@ void telemetry_step(telemetry_state_t *t, const car_state_t *car, float dt)
 
     k = clampf(dt * TELEMETRY_SMOOTH, 0.0f, 1.0f);
     lat_target = car->speed * car->yaw_rate / TELEMETRY_G;
-    lon_target = car->long_accel / TELEMETRY_G;
+    /* 0.9.0: accelerating reads NEGATIVE. The convention is -d(speed)/dt so
+     * the HUD dot, the numeric LON readout and any probe share one sign:
+     * accelerating -> dot down, braking -> dot up, and reverse (a negative
+     * speed change) reads positive - a documented consequence. */
+    lon_target = -car->long_accel / TELEMETRY_G;
 
     t->lat_g += (lat_target - t->lat_g) * k;
     t->lon_g += (lon_target - t->lon_g) * k;

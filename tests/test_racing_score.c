@@ -90,14 +90,111 @@ static void test_score_finishes_once(void)
     CHECK(score_remaining(&r) > 0.0f);
 
     score_step(&r, true, 0.5f, 1.0f / 60.0f); /* frame 3601 */
-    CHECK(r.state == SCORE_STATE_FINISHED);
+    CHECK(r.state == SCORE_STATE_COASTING);
     CHECK(score_finished(&r));
+    CHECK(!score_result_ready(&r));
     CHECK(nearly(score_remaining(&r), 0.0f, 1e-6f));
     CHECK(nearly(r.distance_m, 1800.5f, 1e-2f));
 
     score_step(&r, true, 99.0f, 0.05f); /* latched: no more score */
     CHECK(nearly(r.distance_m, 1800.5f, 1e-2f));
     CHECK(nearly(score_remaining(&r), 0.0f, 1e-6f));
+}
+
+/* Drive a run to the latch; the guard turns a never-finishing score into a
+ * CHECK failure, not a hang. */
+static void finish_run(score_run_t *r)
+{
+    int guard = 0;
+
+    score_reset(r, false);
+    while (!score_finished(r) && guard++ < 4000)
+        score_step(r, true, 0.5f, 1.0f / 60.0f);
+    CHECK(score_finished(r));
+}
+
+static void test_score_coast_latch_needs_0_3_s(void)
+{
+    score_run_t r;
+
+    finish_run(&r);
+    CHECK(r.state == SCORE_STATE_COASTING);
+    CHECK(!score_result_ready(&r));
+
+    score_coast_step(&r, 0.5f, false, 0.10f);
+    CHECK(!score_result_ready(&r));
+    score_coast_step(&r, 0.5f, false, 0.10f);
+    CHECK(!score_result_ready(&r));
+    score_coast_step(&r, 0.5f, false, 0.10f);
+    CHECK(score_result_ready(&r));
+    CHECK(r.state == SCORE_STATE_RESULT);
+}
+
+static void test_score_coast_latch_resets_when_moving(void)
+{
+    score_run_t r;
+
+    finish_run(&r);
+    score_coast_step(&r, 0.5f, false, 0.20f); /* 0.2 s of rest so far */
+    CHECK(!score_result_ready(&r));
+    score_coast_step(&r, 1.0f, false, 0.05f); /* 3.6 km/h: reset */
+    CHECK(!score_result_ready(&r));
+    score_coast_step(&r, 0.5f, false, 0.20f); /* only 0.2 s since the reset */
+    CHECK(!score_result_ready(&r));
+    score_coast_step(&r, 0.5f, false, 0.11f);
+    CHECK(score_result_ready(&r));
+}
+
+static void test_score_coast_airborne_never_latches(void)
+{
+    score_run_t r;
+    int i;
+
+    finish_run(&r);
+    for (i = 0; i < 100; i++) /* 5 s airborne at 0 m/s */
+        score_coast_step(&r, 0.0f, true, 0.05f);
+    CHECK(!score_result_ready(&r));
+    score_coast_step(&r, 0.0f, false, 0.35f); /* landed: one grounded step */
+    CHECK(score_result_ready(&r));
+}
+
+static void test_score_coast_after_reverse_still_latches(void)
+{
+    score_run_t r;
+
+    finish_run(&r);
+    /* |speed|: a car that arrives already reversing still counts as at rest
+     * once it is inside the threshold */
+    score_coast_step(&r, -0.4f, false, 0.31f);
+    CHECK(score_result_ready(&r));
+}
+
+static void test_score_brake_is_gated_during_the_coast(void)
+{
+    score_run_t r;
+
+    finish_run(&r);
+    CHECK(score_brake_allowed(&r, 5.0f));     /* rolling: brake live       */
+    CHECK(!score_brake_allowed(&r, 0.556f));  /* at 2 km/h: gate closes    */
+    CHECK(!score_brake_allowed(&r, 0.0f));
+    CHECK(!score_brake_allowed(&r, -0.9f));   /* 20 fps overshoot: no reverse */
+
+    score_reset(&r, false);
+    CHECK(score_brake_allowed(&r, 0.0f));     /* IDLE/FREE/RUNNING: ungated */
+    CHECK(score_brake_allowed(&r, -3.0f));
+}
+
+static void test_score_result_never_returns_to_running(void)
+{
+    score_run_t r;
+
+    finish_run(&r);
+    score_coast_step(&r, 0.0f, false, 0.35f);
+    CHECK(score_result_ready(&r));
+    score_step(&r, true, 50.0f, 0.05f);   /* no score in RESULT */
+    score_coast_step(&r, 0.0f, false, 0.5f);
+    CHECK(r.state == SCORE_STATE_RESULT);
+    CHECK(nearly(r.distance_m, 1800.0f, 0.6f));
 }
 
 static void test_score_free_drive_is_inert(void)
@@ -604,12 +701,156 @@ static void test_hiscore_rejects_zero_distance_run(void)
     CHECK(b.table[0].count == 1);
 }
 
+/* ------------------------------------------------------- 0.9.0 eligibility */
+
+static void test_hiscore_eligibility_default_terrain(void)
+{
+    road_config_t cfg;
+
+    road_config_defaults(&cfg);
+    CHECK(hiscore_run_eligible(&cfg));
+    cfg.map = ROAD_MAP_UPHILL;
+    CHECK(hiscore_run_eligible(&cfg));
+    cfg.map = ROAD_MAP_HIGHWAY;
+    CHECK(hiscore_run_eligible(&cfg));
+    cfg.rail_enabled = false;   /* not player-adjustable */
+    cfg.rail_density = 0.0f;
+    CHECK(hiscore_run_eligible(&cfg));
+    CHECK(!hiscore_run_eligible(NULL));
+}
+
+static void test_hiscore_eligibility_four_sliders(void)
+{
+    static const float pct_bad[] = {50.0f, 90.0f, 110.0f, 150.0f};
+    road_config_t cfg;
+
+    for (int i = 0; i < 4; i++) {
+        road_config_defaults(&cfg);
+        cfg.elevation_pct = pct_bad[i];
+        CHECK(!hiscore_run_eligible(&cfg));
+        road_config_defaults(&cfg);
+        cfg.hill_pct = pct_bad[i];
+        CHECK(!hiscore_run_eligible(&cfg));
+        road_config_defaults(&cfg);
+        cfg.width_pct = pct_bad[i];
+        CHECK(!hiscore_run_eligible(&cfg));
+    }
+    road_config_defaults(&cfg);
+    cfg.one_lane_width = 4.3f;
+    CHECK(!hiscore_run_eligible(&cfg));
+    road_config_defaults(&cfg);
+    cfg.one_lane_width = 4.5f;
+    CHECK(!hiscore_run_eligible(&cfg));
+    /* and the untouched defaults are eligible again */
+    road_config_defaults(&cfg);
+    CHECK(hiscore_run_eligible(&cfg));
+}
+
+static void test_hiscore_eligibility_tolerance_is_sub_step(void)
+{
+    road_config_t cfg;
+
+    road_config_defaults(&cfg);
+    cfg.elevation_pct = 100.4f;
+    CHECK(hiscore_run_eligible(&cfg));
+    cfg.elevation_pct = 100.6f;
+    CHECK(!hiscore_run_eligible(&cfg));
+    cfg.elevation_pct = 100.0f;
+    cfg.one_lane_width = 4.449f;
+    CHECK(hiscore_run_eligible(&cfg));
+    cfg.one_lane_width = 4.451f;
+    CHECK(!hiscore_run_eligible(&cfg));
+    cfg.one_lane_width = 4.4f;
+    cfg.hill_pct = NAN;
+    CHECK(!hiscore_run_eligible(&cfg));
+}
+
+static void test_hiscore_ineligible_run_is_never_written(void)
+{
+    hiscore_book_t b;
+    hiscore_result_t out;
+    bool needs_save = true;
+    road_config_t cfg;
+
+    hiscore_clear(&b);
+    memset(&out, 0, sizeof(out));
+    road_config_defaults(&cfg);
+    cfg.width_pct = 120.0f;
+    CHECK(hiscore_commit_run(&b, &out, 1500.0f, 7u, &cfg, 2026, 11, 11,
+                             &needs_save) == 0);
+    CHECK(!out.eligible);
+    CHECK(!needs_save);
+    CHECK(b.table[ROAD_MAP_DEFAULT].count == 0);
+    /* the entry is still fully filled: the card must say WHICH run it refuses */
+    CHECK(out.entry.map == ROAD_MAP_DEFAULT);
+    CHECK(out.entry.seed == 7u);
+    CHECK(out.entry.distance_dm == 15000u);
+    CHECK(out.entry.width_pct == 120);
+    CHECK(out.entry.elevation_pct == 100 && out.entry.hill_pct == 100);
+    CHECK(strcmp(hiscore_ineligible_reason(&out), "CUSTOM TERRAIN") == 0);
+
+    road_config_defaults(&cfg);
+    CHECK(hiscore_commit_run(&b, &out, 1500.0f, 7u, &cfg, 2026, 11, 11,
+                             &needs_save) == 1);
+    CHECK(out.eligible);
+    CHECK(needs_save);
+    CHECK(hiscore_ineligible_reason(&out) == NULL);
+
+    /* a zero-distance ineligible run is still rejected, not "eligible" */
+    hiscore_clear(&b);
+    CHECK(hiscore_commit_run(&b, &out, 0.0f, 7u, &cfg, 0, 0, 0, &needs_save)
+          == 0);
+    CHECK(!needs_save && b.table[0].count == 0);
+}
+
+static void test_hiscore_commit_path_ignores_every_setting(void)
+{
+    /* Every settings value the game can hold must leave a default-terrain run
+     * eligible. The call cannot pass settings - that is the point: the day a
+     * settings argument is added to the predicate or the commit call, this
+     * test stops compiling. */
+    racing_settings_t s;
+
+    for (int i = 0; i < 9; i++) {
+        hiscore_book_t b;
+        hiscore_result_t out;
+        bool needs_save = false;
+        road_config_t cfg;
+
+        settings_defaults(&s);
+        switch (i) {
+        case 1: s.steer_mode = RACING_STEER_ANALOG; break;
+        case 2: s.sensitivity = 0.5f; break;
+        case 3: s.sensitivity = 1.5f; break;
+        case 4: s.sign_scale_pct = 60; break;
+        case 5: s.sign_scale_pct = 160; break;
+        case 6: s.minimap = false; s.gmeter = false; s.steer_bar = false;
+                break;
+        case 7: s.analog_centre = 0; s.analog_deadzone = 8; break;
+        case 8: s.analog_centre = 255; s.analog_deadzone = 56; break;
+        default: break;
+        }
+        (void)s;   /* the settings never enter the call, by design */
+        road_config_defaults(&cfg);
+        hiscore_clear(&b);
+        CHECK(hiscore_commit_run(&b, &out, 900.0f, 3u, &cfg, 2026, 11, 11,
+                                 &needs_save) == 1);
+        CHECK(out.eligible && needs_save);
+    }
+}
+
 int main(void)
 {
     test_score_release_clock_is_60();
     test_score_starts_on_throttle_only();
     test_score_counts_forward_only();
     test_score_finishes_once();
+    test_score_coast_latch_needs_0_3_s();
+    test_score_coast_latch_resets_when_moving();
+    test_score_coast_airborne_never_latches();
+    test_score_coast_after_reverse_still_latches();
+    test_score_brake_is_gated_during_the_coast();
+    test_score_result_never_returns_to_running();
     test_score_free_drive_is_inert();
     test_hiscore_rank_and_insert();
     test_hiscore_ties_keep_the_older_entry();
@@ -627,6 +868,11 @@ int main(void)
     test_hiscore_commit_reports_the_save_need();
     test_hiscore_dirty_survives_a_non_ranking_run();
     test_hiscore_rejects_zero_distance_run();
+    test_hiscore_eligibility_default_terrain();
+    test_hiscore_eligibility_four_sliders();
+    test_hiscore_eligibility_tolerance_is_sub_step();
+    test_hiscore_ineligible_run_is_never_written();
+    test_hiscore_commit_path_ignores_every_setting();
 
     if (failures) {
         fprintf(stderr, "%d test(s) failed\n", failures);

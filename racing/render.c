@@ -73,6 +73,11 @@
 #define COL_MAP_FILL RGB(0x9C, 0xAE, 0xC0)
 #define COL_HUD_WARN RGB(0xFF, 0x90, 0x20)
 #define COL_HUD_SLIP RGB(0xFF, 0x50, 0x30)
+#ifdef RACING_DIAG_DASH
+#define COL_DASH RGB(0xFF, 0x00, 0xFF) /* diagnostic magenta */
+#else
+#define COL_DASH COL_WHITE
+#endif
 #define COL_SHADOW 0x38000000u
 #define COL_WELCOME_BG RGB(0x10, 0x18, 0x28)
 
@@ -83,15 +88,6 @@
 
 #define MAX_CAR_VERTS 2048
 
-/*
- * Lane dashes are drawn as depth-less decals (0.8.0, Part C), so a dash beyond
- * a crest would paint over the crest and the ground fan. Emitting only the
- * nearest 120 m bounds that artefact: a 0.15 m dash is 0.33 px wide at 120 m
- * (f = 261.3 px; 0.6 px is the ~65 m value), so the residual is sub-pixel, and
- * the far dashes are invisible anyway. Kept here rather than road.h so the rail
- * branch's road.h edit stays disjoint (see the 0.8.0 plan section 4).
- */
-#define ROAD_DASH_AHEAD 120.0f
 
 /*
  * Ground fan. The PSP GE does not clip laterally: a primitive with a vertex
@@ -139,6 +135,7 @@ static float view_z;
 static float view_fx;
 static float view_fz;
 static float view_s;
+static float view_y;
 
 /* --------------------------------------------------------------- colours */
 
@@ -442,7 +439,7 @@ static void draw_road(float s0, float s1)
     sceGuDrawArray(GU_TRIANGLE_STRIP, V3D_TEX_FMT, rows * 2, NULL, v);
 }
 
-static void draw_lane_dashes(float s0, float s1)
+static void draw_lane_dashes(float s0, float s1, float eye_s, float eye_y)
 {
     float dash_s0 = floorf(s0 / ROAD_DASH_PERIOD) * ROAD_DASH_PERIOD;
     int bands = (int)((s1 - dash_s0) / ROAD_MESH_STEP);
@@ -450,12 +447,49 @@ static void draw_lane_dashes(float s0, float s1)
     Vtx *v;
     int n = 0;
     int i;
+    /* 0.9.0 sight-line cull. One forward pass over the same 5 m lattice the
+     * dashes use: a band is emitted only when its own lattice point AND its
+     * far endpoint are visible from the camera, because a quad that straddles
+     * a crest lip cannot be clipped per pixel (this pass is depth-less). The
+     * lattice is world-anchored and the eye position is FRACTIONAL, so the
+     * decision tracks the real sight line (a rounded origin over-culls). */
+    float base = floorf(eye_s / ROAD_SIGHT_STEP) * ROAD_SIGHT_STEP;
+    float eye_pos = (eye_s - base) / ROAD_SIGHT_STEP;
+    float hbuf[ROAD_SIGHT_MAX_POINTS];
+    bool vis[ROAD_SIGHT_MAX_POINTS];
+    int head = 0;    /* band index of the first lattice point */
+    int points = 0;
 
     if (bands < 1 || max_verts <= 0)
         return;
     v = alloc_verts(max_verts);
     if (!v)
         return;
+
+    /* Lattice point j is at s = base + j*STEP, i.e. band index head + j. When
+     * the base falls behind the dash window, start at the window instead (the
+     * window start is a multiple of the dash period, so still step-aligned). */
+    if (base < dash_s0) {
+        base = dash_s0;
+        eye_pos = (eye_s - base) / ROAD_SIGHT_STEP;
+    }
+    head = (int)floorf((base - dash_s0) / ROAD_MESH_STEP + 0.5f);
+    if (head < 0)
+        head = 0;
+    if (head <= bands) {
+        points = bands + 1 - head;
+        if (points > ROAD_SIGHT_MAX_POINTS)
+            points = ROAD_SIGHT_MAX_POINTS; /* defence in depth; unreachable */
+        for (i = 0; i < points; i++)
+            hbuf[i] = road_sample(base + (float)i * ROAD_SIGHT_STEP).height;
+        (void)road_sight_visible(hbuf, points, eye_pos, ROAD_SIGHT_STEP, eye_y,
+                                 ROAD_DASH_LIFT, ROAD_SIGHT_MARGIN, vis);
+
+#ifdef RACING_DIAG_DASH_UNCULLED
+        for (i = 0; i < points; i++)
+            vis[i] = true;
+#endif
+    }
 
     for (i = 0; i < bands; i++) {
         float s = dash_s0 + (float)i * ROAD_MESH_STEP;
@@ -472,6 +506,10 @@ static void draw_lane_dashes(float s0, float s1)
             continue;
         if (!road_dash_on(s))
             continue;
+        if (head <= bands && i >= head && i + 1 - head < points) {
+            if (!vis[i - head] || !vis[i + 1 - head])
+                continue;
+        }
 
         r0x = -cosf(p0.heading);
         r0z = -sinf(p0.heading);
@@ -501,7 +539,7 @@ static void draw_lane_dashes(float s0, float s1)
             d = (P3){p1.x + (lat1 - ROAD_DASH_HALF_WIDTH) * r1x,
                      p1.height + ROAD_DASH_LIFT,
                      p1.z + (lat1 - ROAD_DASH_HALF_WIDTH) * r1z};
-            world_quad4(v, &n, a, b, c, d, COL_WHITE);
+            world_quad4(v, &n, a, b, c, d, COL_DASH);
         }
     }
 
@@ -1098,7 +1136,10 @@ static void draw_result(const render_frame_args_t *args)
     }
     card_text_centre(text, 108.0f, 2, COL_HUD_TEXT);
 
-    if (result->rank == 1)
+    if (!result->eligible)
+        card_text_centre(hiscore_ineligible_reason(result), 124.0f, 1,
+                         COL_HUD_WARN);
+    else if (result->rank == 1)
         card_text_centre("NEW BEST", 124.0f, 2, COL_HUD_ACCENT);
 
     card_text_centre("X RETRY   START MENU", 150.0f, 2, COL_HUD_TEXT);
@@ -1310,6 +1351,7 @@ static void setup_3d(const car_state_t *car, float dt)
     }
 
     view_x = eye.x;
+    view_y = eye.y;
     view_z = eye.z;
 
     sceGumMatrixMode(GU_PROJECTION);
@@ -1700,7 +1742,7 @@ void render_frame(const render_frame_args_t *args, float dt)
      * HERE, by their caller, after both have returned. */
     sceGuDisable(GU_DEPTH_TEST);
     sceGuDepthMask(GU_TRUE);
-    draw_lane_dashes(s0, car->s + ROAD_DASH_AHEAD);
+    draw_lane_dashes(s0, car->s + ROAD_DASH_AHEAD, view_s, view_y);
     draw_shadow(car->s, car_x, car_z, yaw);
     sceGuDepthMask(GU_FALSE);
     sceGuEnable(GU_DEPTH_TEST);

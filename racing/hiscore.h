@@ -56,6 +56,23 @@
 #define HISCORE_ONE_LANE_DM_MIN 40
 #define HISCORE_ONE_LANE_DM_MAX 60
 
+/*
+ * 0.9.0: only a run on the DEFAULT TERRAIN is comparable. The four
+ * session-only sliders (elevation, hills, width, one-lane) disqualify; every
+ * other choice in the game - steering mode, sensitivity, sign size, HUD
+ * toggles, analog centre/deadzone - is not even a parameter, which is the
+ * point: nothing but terrain can disqualify a run. map, rail_enabled and
+ * rail_density are ignored (per-map tables; not player-adjustable).
+ *
+ * PCT_EPS is 5 % of the 10 pct slider step: slider values are exact multiples
+ * of 10, so it only absorbs float noise, never a real step. ONE_LANE_EPS is
+ * half a 0.1 m step.
+ */
+#define HISCORE_TERRAIN_PCT_EPS 0.5f
+#define HISCORE_TERRAIN_ONE_LANE_EPS 0.05f
+
+bool hiscore_run_eligible(const road_config_t *terrain);
+
 typedef struct {
     uint16_t distance_dm;
     uint32_t seed;
@@ -80,7 +97,8 @@ typedef struct {
 
 typedef struct {
     hiscore_entry_t entry;
-    int rank; /* 1..HISCORE_TOP_N, or 0 = not ranked */
+    int rank;      /* 1..HISCORE_TOP_N, or 0 = not ranked */
+    bool eligible; /* false = non-default terrain: never inserted */
 } hiscore_result_t;
 
 /* Empty every table. Always memset, so entry padding is zero. */
@@ -133,6 +151,21 @@ void hiscore_format_date(char *buf, const hiscore_entry_t *e);
  * table (nothing was written), else "SAVED"/"NOT SAVED".
  */
 const char *hiscore_result_status(const hiscore_result_t *r, bool save_failed);
+
+/*
+ * The one commit path: ALWAYS fill out->entry with hiscore_entry_from_run()
+ * (the result card prints MAP / SEED / DIST from it, so a refused run must
+ * still identify itself), then insert only when the terrain is default. An
+ * ineligible run is never inserted and *needs_save stays false, so the file
+ * cannot change. Returns the rank (0 when not ranked).
+ */
+int hiscore_commit_run(hiscore_book_t *book, hiscore_result_t *out,
+                       float distance_m, uint32_t seed,
+                       const road_config_t *terrain, int year, int month,
+                       int day, bool *needs_save);
+
+/* "CUSTOM TERRAIN" when !out->eligible, else NULL (the card's reason line). */
+const char *hiscore_ineligible_reason(const hiscore_result_t *out);
 
 /*
  * Insert a finished run and report whether it needs a disk write. `needs_save`

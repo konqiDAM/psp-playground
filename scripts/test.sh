@@ -91,3 +91,72 @@ cc -std=c99 -Wall -Wextra -Werror -Iracing \
 ./build/host/test_racing_rail
 
 
+
+# 0.9.0 E1: only TERRAIN may disqualify a run. The predicate's signature is the
+# guarantee, so it is checked, not assumed - and checked on COMMENT-STRIPPED
+# text, because prose must never satisfy a gate (the 0.8.0 decal checker's
+# standard). The stripper is inlined rather than imported from
+# scripts/check-racing-decal-order.py: that file is private (absent from
+# scripts/public-manifest.txt) and public/scripts/test.sh runs this same gate.
+python3 - <<'E1_GATE'
+import re
+
+
+def strip_comments(text):
+    """Blank /* */ and // comments. Quote-aware: a // or /* inside a string
+    literal is code, and a quote inside a comment must not open a string."""
+    out = []
+    i, n = 0, len(text)
+    quote = None
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if quote:
+            out.append(ch)
+            if ch == "\\" and nxt:
+                out.append(nxt)
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "/" and nxt == "*":
+            end = text.find("*/", i + 2)
+            if end < 0:
+                break
+            out.append(" ")
+            i = end + 2
+            continue
+        if ch == "/" and nxt == "/":
+            end = text.find("\n", i)
+            if end < 0:
+                break
+            i = end
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+hiscore_c = strip_comments(open("racing/hiscore.c").read())
+main_c = strip_comments(open("racing/main.c").read())
+hiscore_h = strip_comments(open("racing/hiscore.h").read())
+
+if "hiscore_run_eligible" not in hiscore_c:
+    raise SystemExit("E1 gate: racing/hiscore.c has no hiscore_run_eligible "
+                     "outside comments")
+if len(re.findall(r"\bhiscore_commit_run\s*\(", main_c)) != 1:
+    raise SystemExit("E1 gate: racing/main.c must call hiscore_commit_run() "
+                     "exactly once outside comments")
+decl = re.search(r"\bbool\s+hiscore_run_eligible\s*\(([^)]*)\)", hiscore_h)
+if not decl:
+    raise SystemExit("E1 gate: no hiscore_run_eligible() declaration in "
+                     "racing/hiscore.h outside comments")
+params = [p.strip() for p in decl.group(1).split(",") if p.strip()]
+if params != ["const road_config_t *terrain"]:
+    raise SystemExit(f"E1 gate: hiscore_run_eligible takes {params}; only "
+                     f"terrain may disqualify a run")
+E1_GATE

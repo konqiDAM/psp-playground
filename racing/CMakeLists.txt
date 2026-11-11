@@ -49,6 +49,31 @@ if (RACING_DIAG_SHORT_TA)
     target_compile_definitions(psp_racing PRIVATE RACING_DIAG_TA_SECONDS=6)
 endif()
 
+# Diagnostic: paint the lane dashes magenta so the crest probe can count dash
+# ink unambiguously (the only magenta in the scene). Same cull code path; only
+# the vertex colour differs. Off by default.
+option(RACING_DIAG_DASH "Paint Racing 3D lane dashes magenta for the crest probe" OFF)
+if (RACING_DIAG_DASH)
+    target_compile_definitions(psp_racing PRIVATE RACING_DIAG_DASH=1)
+endif()
+
+# Diagnostic: start the run at this centreline s (0 = normal). The dash/crest
+# probe places the car just before a crest so the hidden dashes project at
+# several pixels instead of sub-pixel. The define is only emitted when the
+# value is positive, so a release build never sees it.
+set(RACING_DIAG_START_S 0 CACHE STRING "Diagnostic: start the car at this centreline s")
+if (RACING_DIAG_START_S GREATER 0)
+    target_compile_definitions(psp_racing PRIVATE RACING_DIAG_START_S=${RACING_DIAG_START_S})
+endif()
+
+# Diagnostic: force every dash band visible (the crest probe's negative
+# control). Same EBOOT + same captures as RACING_DIAG_DASH, so the probe can
+# measure exactly what the cull removes. Off by default.
+option(RACING_DIAG_DASH_UNCULLED "Disable the dash sight-line cull for the crest probe" OFF)
+if (RACING_DIAG_DASH_UNCULLED)
+    target_compile_definitions(psp_racing PRIVATE RACING_DIAG_DASH_UNCULLED=1)
+endif()
+
 target_link_libraries(psp_racing PRIVATE
     pspdebug
     pspdisplay
@@ -66,6 +91,6 @@ create_pbp_file(
     BACKGROUND_PATH NULL
     PREVIEW_PATH NULL
     TITLE "Racing 3D"
-    VERSION 05.00
+    VERSION 0.9.0
     MEMSIZE ${PSP_MEMSIZE}
 )

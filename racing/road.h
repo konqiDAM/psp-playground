@@ -65,6 +65,20 @@
 #define ROAD_DASH_HALF_WIDTH 0.075f
 #define ROAD_DASH_LIFT 0.015f
 
+/*
+ * Lane dashes are drawn as depth-less decals (0.8.0, Part C), so a dash beyond
+ * a crest would paint over the crest. Emitting only the nearest 120 m bounds
+ * that: a 0.15 m dash is 0.33 px wide at 120 m (f = 261.3 px), so the residual
+ * is sub-pixel. 0.9.0 adds a sight-line cull (ROAD_SIGHT_*) for what is left.
+ * Defined here (not in render.c) because the host budget test needs it.
+ */
+#define ROAD_DASH_AHEAD 120.0f
+
+/* Sight-line cull for the depth-less dash decals (0.9.0). */
+#define ROAD_SIGHT_STEP ROAD_MESH_STEP /* the road/dash lattice step */
+#define ROAD_SIGHT_MARGIN 0.05f        /* same margin the warning signs use */
+#define ROAD_SIGHT_MAX_POINTS 32       /* measured worst 28, +14 % */
+
 #define ROAD_POST_SPACING 40.0f
 #define ROAD_POST_X (ROAD_EDGE_X + 0.6f) /* 10.1 */
 
@@ -190,6 +204,34 @@ typedef struct {
     signed char side;    /* -1 left, +1 right */
     unsigned char kind;  /* ROAD_RAIL_KIND_* bit mask */
 } road_rail_span_t;
+
+/*
+ * Sight-line visibility over a uniform height profile - the warning signs'
+ * occlusion test (signs.c line_clear()) applied to a lattice, in ONE forward
+ * pass so the per-frame cost is O(n) and not O(n^2).
+ *
+ * h[0..n-1] are the road heights at s = base + i*step (base is world-aligned:
+ * a multiple of step). eye_pos is the eye's FRACTIONAL lattice index,
+ * (eye_s - base) / step, and eye_y the camera height. A point i is visible
+ * when the straight line from (eye_pos, eye_y) to (i, h[i] + lift) stays at or
+ * above h[j] + margin for every j strictly between eye_pos and i; the
+ * comparison is >=, so a target exactly on an occluder line is visible. Points
+ * with i <= eye_pos are at or behind the camera and always visible. Returns
+ * the number of visible points (0 and an all-false `out` on bad input).
+ *
+ * eye_pos is FRACTIONAL on purpose: rounding the origin down to the lattice
+ * puts it up to one step (5 m) behind the camera at camera height, which drops
+ * the test line below the true sight line near the eye and OVER-CULLS
+ * (measured: 3.34 % of frames disagree, worst bias 0.688 m = 13.8x the margin).
+ *
+ * PURE: no road state, no globals - the host test feeds it a synthetic crest
+ * and the renderer feeds it road_sample() heights. The lattice is anchored to
+ * absolute s (multiples of 5 m, and ROAD_REBASE_ALIGN is 80 m), so the sample
+ * set changes only at the occlusion boundary and a band's visibility does not
+ * oscillate frame to frame (measured: 0 transitions over 240 frames).
+ */
+int road_sight_visible(const float *h, int n, float eye_pos, float step,
+                       float eye_y, float lift, float margin, bool *out);
 
 void road_config_defaults(road_config_t *cfg);
 bool road_config_validate(road_config_t *cfg);
