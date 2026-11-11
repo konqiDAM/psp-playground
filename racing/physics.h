@@ -61,7 +61,7 @@
 #define CAR_BOOST_YAW 0.10f
 
 /* Guardrail contact: rail-only effects, never applied at the plain road edge. */
-#define CAR_RAIL_MARGIN ROAD_RAIL_STOP /* wheel half-width; clamp = edge - it */
+#define CAR_RAIL_MARGIN ROAD_RAIL_STOP_FULL /* wheel half-width + 1 cm margin; documentation only */
 #define CAR_RAIL_SCRUB 0.15f           /* one-off speed loss on first contact */
 #define CAR_RAIL_HOLD 0.35f            /* flash latch, seconds */
 
@@ -88,6 +88,7 @@ typedef struct {
     float rail_hold;            /* seconds of rail-contact flash left, >= 0 */
     signed char rail_side;      /* last rail contact: -1 left, +1 right, 0 none */
     bool rail_contact;          /* rail contact on the previous step */
+    float ds;                   /* centreline increment this step, m, + = forward */
 } car_state_t;
 
 typedef struct {

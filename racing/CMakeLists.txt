@@ -5,6 +5,8 @@ add_executable(psp_racing
     render.c
     input.c
     settings.c
+    score.c
+    hiscore.c
     telemetry.c
     minimap.c
     menu.c
@@ -39,6 +41,14 @@ if (RACING_DIAG_NARROW)
     target_compile_definitions(psp_racing PRIVATE RACING_DIAG_NARROW=1)
 endif()
 
+# Diagnostic: shorten the Time Attack clock so the headless probe can reach the
+# result panel and the retry flow in a few seconds. Test-only; default OFF, and
+# the release EBOOT never defines RACING_DIAG_TA_SECONDS.
+option(RACING_DIAG_SHORT_TA "Use a 6 s Time Attack clock for the headless probe" OFF)
+if (RACING_DIAG_SHORT_TA)
+    target_compile_definitions(psp_racing PRIVATE RACING_DIAG_TA_SECONDS=6)
+endif()
+
 target_link_libraries(psp_racing PRIVATE
     pspdebug
     pspdisplay
@@ -46,6 +56,7 @@ target_link_libraries(psp_racing PRIVATE
     pspgu
     pspgum
     pspctrl
+    psprtc
     m
 )
 

@@ -77,7 +77,32 @@
  * ascending s order, so a dense two-sided stretch must not drop ahead spans
  * (physics would still clamp there: an invisible wall). */
 #define ROAD_RAIL_MAX_SPANS 48
-#define ROAD_RAIL_STOP 1.05f        /* wheel half-width: clamp = edge - STOP */
+#define ROAD_RAIL_MAX_VISIBLE_RUNS 8 /* pieces one merged span may split into */
+/* Visible-run scan: a bracket of this length, bisected this many times at
+ * each crossing. 10 m / 2^8 = 0.039 m, well inside the 0.15 m the probes pin,
+ * and the whole per-frame pass must stay inside ROAD_RAIL_SAMPLE_BUDGET
+ * road_sample() calls.
+ *
+ * The budget is a SAMPLED bound, not a proof over every start seed. Measured
+ * per-frame worst: 192 on the reference frame (ROAD_SEED, car_s 1000), 228
+ * over the repository's 64-seed sweep (seeds i*7919+1, 3 maps, car_s 0..3000
+ * step 50), and 279 / 281 over 12 000 seeds along the game's own
+ * road_next_start_seed orbit / an LCG sequence (3 maps, step 50); the
+ * reviewer's random-seed sweeps measured 288 (4 000 seeds) and 290 (12 000).
+ * Real runs start on arbitrary xorshift32 orbits, which no finite sweep
+ * enumerates, so 320 is a COST TARGET above the measured worst with headroom,
+ * not an upper bound on every orbit. A budget regression is still caught: the
+ * host sweep test fails if its measured worst frame exceeds this value. */
+#define ROAD_RAIL_SCAN_STEP 10.0f
+#define ROAD_RAIL_BISECT_STEPS 8
+#define ROAD_RAIL_SAMPLE_BUDGET 320
+/* The clamp is the car's outer wheel face (half-width 1.04) plus a 1 cm
+ * margin, at EVERY road width: a stop that narrowed with the road put the
+ * wheel face past the rail plane on a one-lane corridor. Eligibility is a
+ * separate question, asked by road_rail_allowed(). */
+#define ROAD_RAIL_STOP_FULL 1.05f
+#define ROAD_RAIL_MIN_CENTRE 0.30f /* smallest clamp distance from the centre */
+#define ROAD_RAIL_CLAMP_MIN_TOP 0.25f /* the beam must be this far above road */
 #define ROAD_RAIL_SIDE_LEFT 1
 #define ROAD_RAIL_SIDE_RIGHT 2
 #define ROAD_RAIL_KIND_OUTSIDE 1
@@ -158,7 +183,10 @@ typedef struct {
 } road_warning_t;
 
 typedef struct {
-    float s0, s1;        /* local s, s0 < s1, never clipped to the query */
+    float s0, s1;        /* grammar span: the rise/sink envelope is evaluated
+                          * on THIS, never clipped to the query */
+    float v0, v1;        /* visible + clamped interval: iterate and emit on
+                          * THIS (the beam is below the road outside it) */
     signed char side;    /* -1 left, +1 right */
     unsigned char kind;  /* ROAD_RAIL_KIND_* bit mask */
 } road_rail_span_t;
@@ -190,14 +218,74 @@ road_sample_t road_sample(float s);
  */
 float road_rail_limit(const road_sample_t *p, int side);
 
+/* The stop is the wheel half-width plus margin, constant at every width. */
+float road_rail_stop(float half_width);
+
+/* Eligibility, separate from the stop: half - ROAD_RAIL_STOP_FULL >=
+ * ROAD_RAIL_MIN_CENTRE. !allowed() means NO rail and NO limit at all. */
+bool road_rail_allowed(float half_width);
+
+/*
+ * THE rail predicate, shared by the sampler, the collector and the renderer.
+ * It takes the already-computed sample: it must NEVER call road_sample(), or
+ * the road_sample() -> predicate path would be a cycle. `s0, s1` is the
+ * MERGED union of every overlapping railed window touching s, never a single
+ * window's own interval (a per-window interval leaves a drive-through hole
+ * where the merged beam is drawn at full height but no clamp exists).
+ */
+bool road_rail_ok(const road_sample_t *p, float s, float s0, float s1);
+
+/*
+ * Merged union of the windows in a[]/b[] that contain s: u0/u1 cover every
+ * window that overlaps the one containing s. Pure; O(n^2) worst case with
+ * n <= 6 (the absorption loop runs until nothing changes). Returns false when
+ * s is in no window. This is the sampler's mechanism (it unions its own at
+ * most six candidate windows in place instead of calling the collector).
+ */
+bool road_rail_union(float s, const float *a, const float *b, int n,
+                     float *u0, float *u1);
+
+/* Pairwise merge of two windows; false when they are disjoint. */
+bool road_rail_merge(float a0, float b0, float a1, float b1, float *o0,
+                     float *o1);
+
+/*
+ * The renderer's band decision, host-tested so the PSP-only draw cannot
+ * drift from the clamp: a 5 m band [a_s, b_s] is emitted only when BOTH of
+ * its endpoint samples satisfy road_rail_ok() over the grammar span
+ * [s0, s1]. guardrail_gu.c must call this (a source gate in test.sh).
+ */
+bool road_rail_band_ok(const road_sample_t *a, float a_s,
+                       const road_sample_t *b, float b_s, float s0, float s1);
+
+/* The predicate the visible-interval splitter bisects on. */
+typedef bool (*road_rail_visible_fn)(float s, float s0, float s1);
+
+/*
+ * Split [s0, s1] into the DISJOINT runs where `visible` holds. A false gap
+ * inside one grammar span must never be bridged into a single [v0, v1]: the
+ * bands inside the gap would be drawn while rail_limit_* is 0 there. Coarse
+ * brackets of ROAD_RAIL_SCAN_STEP (10 m), bisected ROAD_RAIL_BISECT_STEPS (8)
+ * times at each crossing; runs[2i] and runs[2i+1] are the start and end of run
+ * i in ascending s. Returns the number of runs written (0..max_runs). Pure: it
+ * never reads road state itself, which is what lets a host test feed it a
+ * synthetic gap.
+ */
+int road_rail_visible_runs(float s0, float s1, road_rail_visible_fn visible,
+                           float *runs, int max_runs);
+
 /* world_s = local_s + road_world_offset(). */
 float road_world_offset(void);
 
 /*
  * Full rail intervals overlapping [s0, s1], one entry per side, sorted by
  * (s0, side) with left before right and merged per side. Emitted spans are
- * never clipped to the query, so the rise/sink envelope stays intact.
- * Returns the number written (0..max).
+ * never clipped to the query, so the rise/sink envelope stays intact, and
+ * each carries its visible interval [v0, v1] (see road_rail_visible_runs):
+ * the drawn span is the clamped span. A merged span whose predicate has a
+ * false gap in the middle is emitted as one entry PER RUN, so the pieces
+ * share (s0, side) and are adjacent in ascending v0. Returns the number
+ * written (0..max).
  */
 int road_rail_collect(float s0, float s1, road_rail_span_t *out, int max);
 

@@ -99,6 +99,8 @@ static void test_span_selection_keeps_the_near_end(void)
     for (i = 0; i < 4; i++) {
         spans[i].s0 = 1000.0f + 120.0f * (float)i;
         spans[i].s1 = spans[i].s0 + 100.0f;
+        spans[i].v0 = spans[i].s0;
+        spans[i].v1 = spans[i].s1;
         spans[i].side = (i & 1) ? 1 : -1;
         spans[i].kind = 1;
     }
@@ -112,6 +114,8 @@ static void test_span_selection_keeps_the_near_end(void)
     for (i = 0; i < 4; i++) {
         spans[i].s0 = 1000.0f + 120.0f * (float)(3 - i); /* descending */
         spans[i].s1 = spans[i].s0 + 100.0f;
+        spans[i].v0 = spans[i].s0;
+        spans[i].v1 = spans[i].s1;
     }
     total = guardrail_select_spans(spans, 4, keep, 3 * cost + 6, 6, 900.0f);
     CHECK(total == 3 * cost);
@@ -128,6 +132,8 @@ static void test_span_selection_keeps_the_near_end(void)
     for (i = 0; i < 4; i++) {
         spans[i].s0 = 1000.0f + 120.0f * (float)i;
         spans[i].s1 = spans[i].s0 + 100.0f;
+        spans[i].v0 = spans[i].s0;
+        spans[i].v1 = spans[i].s1;
     }
     total = guardrail_select_spans(spans, 4, keep, 3 * cost + 5, 6, 900.0f);
     CHECK(total == 2 * cost);
@@ -140,6 +146,8 @@ static void test_span_selection_keeps_the_near_end(void)
     for (i = 0; i < 4; i++) {
         spans[i].s0 = 1000.0f + 120.0f * (float)i;
         spans[i].s1 = spans[i].s0 + 100.0f;
+        spans[i].v0 = spans[i].s0;
+        spans[i].v1 = spans[i].s1;
     }
     total = guardrail_select_spans(spans, 4, keep, 3 * cost + 6, 6, 1125.0f);
     CHECK(total == 3 * cost);
@@ -163,6 +171,122 @@ static void test_span_selection_keeps_the_near_end(void)
     CHECK(keep[0] == 0);
 }
 
+static void test_rail_plane_is_the_asphalt_edge(void)
+{
+    /* D2: the plane is the ASPHALT edge at half_width, not the shoulder edge
+     * (edge_half_width) the beam used to sit on; the post is 0.02 m outboard.
+     * A 0.1 m sweep over every width the grammar can produce. */
+    float h;
+
+    CHECK(nearly(guardrail_rail_lateral(5.0f), 5.0f, 1e-6f));
+    CHECK(nearly(guardrail_post_lateral(5.0f) - guardrail_rail_lateral(5.0f),
+                 0.02f, 1e-6f));
+    for (h = 0.5f; h <= 20.0f + 1e-3f; h += 0.1f) {
+        CHECK(nearly(guardrail_rail_lateral(h), h, 1e-6f));
+        CHECK(nearly(guardrail_post_lateral(h) - guardrail_rail_lateral(h),
+                     GUARDRAIL_POST_OFFSET, 1e-6f));
+    }
+}
+
+static void test_band_range_is_the_visible_interval(void)
+{
+    /* The renderer's iteration range, host-tested. A renderer that iterates
+     * the grammar span [s0, s1] starts the beam 6.36 m before the clamp
+     * exists (an invisible wall) and the pixel probe cannot see it: that is
+     * ~3 % of the corridor's rail pixels, inside the probe's band. */
+    guardrail_span_ref_t span;
+    float from = -1.0f;
+    float to = -1.0f;
+
+    span.s0 = 100.0f;
+    span.s1 = 400.0f;
+    span.v0 = 106.36f;
+    span.v1 = 393.64f;
+    span.side = -1;
+    span.kind = 1;
+    guardrail_band_range(&span, &from, &to);
+    CHECK(nearly(from, 106.36f, 1e-6f));
+    CHECK(nearly(to, 393.64f, 1e-6f));
+    CHECK(from > span.s0 + 6.0f);            /* not the grammar start */
+    CHECK(to < span.s1 - 6.0f);              /* not the grammar end */
+    CHECK(guardrail_band_count(from, to) == 58);   /* ceil(287.28 / 5) */
+
+    /* a visible interval wider than the grammar span is clamped to it */
+    span.v0 = 90.0f;
+    span.v1 = 410.0f;
+    guardrail_band_range(&span, &from, &to);
+    CHECK(nearly(from, 100.0f, 1e-6f));
+    CHECK(nearly(to, 400.0f, 1e-6f));
+
+    /* an empty run collapses to a point, never to a negative range */
+    span.v0 = 250.0f;
+    span.v1 = 250.0f;
+    guardrail_band_range(&span, &from, &to);
+    CHECK(nearly(from, 250.0f, 1e-6f));
+    CHECK(nearly(to, 250.0f, 1e-6f));
+    CHECK(guardrail_band_count(from, to) == 0);
+}
+
+static void test_split_runs_share_one_grammar_span(void)
+{
+    /* A split emits one entry per visible run with the same (s0, s1, side):
+     * the renderer must charge and draw the posts ONCE, not per run. */
+    guardrail_span_ref_t a;
+    guardrail_span_ref_t b;
+    guardrail_span_ref_t c;
+
+    a.s0 = 100.0f; a.s1 = 400.0f; a.v0 = 106.0f; a.v1 = 200.0f;
+    a.side = -1; a.kind = 1;
+    b = a;
+    b.v0 = 260.0f;
+    b.v1 = 393.0f;
+    CHECK(guardrail_span_continues(&a, &b));
+    /* a different grammar span, a different side, or a new list all restart */
+    c = b;
+    c.s0 = 500.0f;
+    c.s1 = 700.0f;
+    CHECK(!guardrail_span_continues(&b, &c));
+    c = b;
+    c.side = 1;
+    CHECK(!guardrail_span_continues(&b, &c));
+    CHECK(!guardrail_span_continues(NULL, &b));
+    CHECK(!guardrail_span_continues(&a, NULL));
+}
+
+static void test_split_runs_charge_posts_once(void)
+{
+    /* Two visible runs of ONE grammar span: the bands are charged per run and
+     * the posts once, because the renderer draws them once. Charging the
+     * grammar span per run would count every post twice and shrink the
+     * vertex budget for geometry that is never emitted. */
+    guardrail_span_ref_t spans[2];
+    unsigned char keep[2];
+    int bands_a;
+    int bands_b;
+    int posts;
+    int total;
+
+    spans[0].s0 = 100.0f;
+    spans[0].s1 = 400.0f;
+    spans[0].v0 = 106.0f;
+    spans[0].v1 = 200.0f;
+    spans[0].side = -1;
+    spans[0].kind = 1;
+    spans[1] = spans[0];
+    spans[1].v0 = 260.0f;
+    spans[1].v1 = 393.0f;
+
+    bands_a = guardrail_band_count(spans[0].v0, spans[0].v1);
+    bands_b = guardrail_band_count(spans[1].v0, spans[1].v1);
+    posts = guardrail_post_count(spans[0].s0, spans[0].s1);
+    total = guardrail_select_spans(spans, 2, keep, 100000, 0, 0.0f);
+    CHECK(keep[0] == 1 && keep[1] == 1);
+    CHECK(total == (bands_a + bands_b) * GUARDRAIL_VERTS_PER_BAND +
+                   posts * GUARDRAIL_VERTS_PER_POST);
+    /* and it is NOT the two-grammar-span cost the split used to charge */
+    CHECK(total < 2 * guardrail_span_vertex_cost(spans[0].s0, spans[0].s1));
+}
+
 static void test_vertex_budget(void)
 {
     /* Independent constant; road.h is deliberately not included here. */
@@ -181,6 +305,10 @@ int main(void)
     test_envelope_is_monotone_and_bounded();
     test_posts_and_bands();
     test_span_selection_keeps_the_near_end();
+    test_rail_plane_is_the_asphalt_edge();
+    test_band_range_is_the_visible_interval();
+    test_split_runs_share_one_grammar_span();
+    test_split_runs_charge_posts_once();
     test_vertex_budget();
 
     if (failures) {

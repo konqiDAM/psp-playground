@@ -30,11 +30,16 @@
 #define SIGNS_WIDTH_SLOPE 0.05f
 #define SIGNS_SIGHT_STEP 10.0f
 
-/* Panel placement (metres). */
-#define SIGNS_LATERAL 2.4f
-#define SIGNS_PANEL_W 2.4f
-#define SIGNS_PANEL_H 1.8f
-#define SIGNS_PANEL_TOP 2.4f
+/* Panel placement (metres). Anchored at the verge, not centred: the inner
+ * edge sits SIGNS_PANEL_GAP from the drivable edge at EVERY scale, so the
+ * post and car clearance are scale-invariant. */
+#define SIGNS_PANEL_W 3.6f        /* 100 % width  (was 2.4) */
+#define SIGNS_PANEL_H 2.7f        /* 100 % height (was 1.8) */
+#define SIGNS_PANEL_BOTTOM 0.70f  /* fixed at every scale (was TOP - H = 0.60) */
+#define SIGNS_PANEL_GAP 0.80f     /* inner edge from the drivable edge (was 1.2) */
+#define SIGNS_SCALE_MIN 0.60f
+#define SIGNS_SCALE_MAX 1.60f
+#define SIGNS_SCALE_DEFAULT 1.00f
 #define SIGNS_POST_W 0.14f
 #define SIGNS_MAX_VERTS 96
 
@@ -56,6 +61,7 @@ typedef struct {
     float road_height;
     float heading;
     float grade;
+    float panel_scale; /* 0.60..1.60, clamped by signs_place() */
 } sign_t;
 
 typedef struct {
@@ -67,14 +73,31 @@ typedef struct {
 } sign_quad_t;
 
 /*
+ * Panel frame in world space. hu/hv are the scale-derived panel half-width
+ * and half-height, so the panel corners AND the symbol quads are built from
+ * one frame and cannot drift apart.
+ */
+typedef struct {
+    sign_vec3_t centre, right, up, normal;
+    float hu, hv; /* panel half-width / half-height, scale-derived */
+} panel_frame_t;
+
+typedef panel_frame_t sign_panel_t; /* the public name */
+
+/* The ONLY writer of centre/right/up/normal/hu/hv. */
+void signs_panel_frame(const sign_t *sign, sign_panel_t *out);
+
+/*
  * Place and cull the signs visible from car_s. Pure function of car_s; speed
  * and suspension only raise the visibility eye, exactly as setup_3d() does.
- * Returns the number written (<= max), sorted by ascending s.
+ * `panel_scale` is clamped to SIGNS_SCALE_MIN..SIGNS_SCALE_MAX (non-finite ->
+ * SIGNS_SCALE_DEFAULT) and stored on every sign. Returns the number written
+ * (<= max), sorted by ascending s.
  */
 int signs_place(float car_s, float car_speed, float car_suspension,
-                sign_t *out, int max);
+                float panel_scale, sign_t *out, int max);
 
-/* Panel frame in world space: centre plus right/up/normal unit vectors. */
+/* Thin wrapper over signs_panel_frame(): the pre-0.8.0 call shape. */
 void signs_panel_axes(const sign_t *sign, sign_vec3_t *centre,
                       sign_vec3_t *right, sign_vec3_t *up, sign_vec3_t *normal);
 
@@ -83,5 +106,15 @@ bool signs_panel_corners(const sign_t *sign, sign_vec3_t out[4]);
 
 /* Symbol quads in world space, already offset 0.02 m toward the driver. */
 int signs_symbol_quads(const sign_t *sign, sign_quad_t *out, int max);
+
+/*
+ * Vertex budget, host-testable: one 6-vertex quad each. The post is 4 side
+ * quads (24), the panel face 1 (6), so a sign is signs_base_verts() = 30
+ * depth-tested vertices plus signs_ink_verts(quads) = 6*quads decal ones.
+ */
+int signs_panel_verts(void);  /* 6 */
+int signs_post_verts(void);   /* 24 */
+int signs_base_verts(void);   /* 30 */
+int signs_ink_verts(int quads);
 
 #endif /* RACING_SIGNS_H */

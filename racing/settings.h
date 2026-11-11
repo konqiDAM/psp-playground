@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 #define RACING_SETTINGS_FILE_SIZE 16
-#define RACING_SETTINGS_VERSION 1
+#define RACING_SETTINGS_VERSION 2
 
 #define RACING_SETTINGS_SENS_MIN 50  /* stored x100: 0.50 */
 #define RACING_SETTINGS_SENS_MAX 150 /* 1.50 */
@@ -20,6 +20,11 @@
 #define RACING_SETTINGS_DEADZONE_MAX 56
 #define RACING_SETTINGS_CENTRE_DEFAULT 128
 #define RACING_SETTINGS_DEADZONE_DEFAULT 32
+
+/* v2: byte 9 is the sign size in percent. v1 kept it reserved at 0. */
+#define RACING_SETTINGS_SIGN_SCALE_MIN 60
+#define RACING_SETTINGS_SIGN_SCALE_MAX 160
+#define RACING_SETTINGS_SIGN_SCALE_DEFAULT 100
 
 typedef enum {
     RACING_STEER_DPAD = 0,
@@ -34,6 +39,7 @@ typedef struct {
     bool steer_bar;                 /* default true */
     int analog_centre;              /* 0..255, default 128 */
     int analog_deadzone;            /* 8..56, default 32 */
+    int sign_scale_pct;             /* 60..160, default 100 (RACING.CFG v2) */
 } racing_settings_t;
 
 void settings_defaults(racing_settings_t *s);

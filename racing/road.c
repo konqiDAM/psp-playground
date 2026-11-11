@@ -8,6 +8,9 @@
 
 #include "road.h"
 #include "physics.h"
+/* Header-only rise/sink envelope: the clamp predicate (road_rail_ok) and the
+ * drawn beam must be the same surface, so both sides inline this formula. */
+#include "assets/guardrail/guardrail_env.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -18,6 +21,11 @@ typedef struct {
     int gentle;
     int sign;
 } curve_choice_t;
+
+/* 3 segment windows (i-1..i+1) + 3 narrow windows (k0-1..k0+1). The sampler
+ * writes into arrays of exactly this length, so pin it at compile time. */
+#define RAIL_CAND_MAX 6
+typedef char rail_cand_max_is_6[(RAIL_CAND_MAX == 6) ? 1 : -1];
 
 static road_segment_t segments[ROAD_MAX_SEGMENTS];
 static int head;  /* oldest segment */
@@ -1256,54 +1264,154 @@ road_sample_t road_sample(float s)
     p.half_width = width_at(s + world_offset);
     p.edge_half_width = p.half_width + ROAD_SHOULDER_WIDTH;
 
-    /* Per-side rail limits: curve spans from the segments i-1..i+1 (the
-     * grammar's 25 m minimum segment makes any further one unreachable), plus
-     * the world-anchored narrow corridors. */
+    /* Per-side rail limits. The windows come from the segments i-1..i+1 (the
+     * grammar's 25 m minimum segment makes any further one unreachable) plus
+     * the world-anchored narrow corridors k0-1..k0+1: at most six candidates
+     * per side. They are UNIONED first and the shared predicate is evaluated
+     * on that merged interval, because a per-window envelope has already sunk
+     * where two railed windows overlap while the drawn beam is at full height
+     * (a drive-through hole). No call back into road_sample() from here. */
     p.rail_limit_left = 0.0f;
     p.rail_limit_right = 0.0f;
-    if (active_config.rail_enabled) {
-        float rail = p.edge_half_width - ROAD_RAIL_STOP;
+    if (active_config.rail_enabled && road_rail_allowed(p.half_width)) {
+        float la[RAIL_CAND_MAX], lb[RAIL_CAND_MAX];
+        float ra[RAIL_CAND_MAX], rb[RAIL_CAND_MAX];
+        float rail = p.half_width - road_rail_stop(p.half_width);
         float world_s = s + world_offset;
+        float u0;
+        float u1;
+        int nl = 0;
+        int nr = 0;
         int j;
 
-        if (rail > 0.0f) {
-            for (j = i - 1; j <= i + 1; j++) {
-                const road_segment_t *near;
+        for (j = i - 1; j <= i + 1; j++) {
+            const road_segment_t *near;
+            float a;
+            float b;
+
+            if (j < 0 || j >= count)
+                continue;
+            near = at(j);
+            a = near->start_s - ROAD_RAIL_LEAD;
+            b = near->start_s + near->length + ROAD_RAIL_TRAIL;
+            if (near->rail_side & ROAD_RAIL_SIDE_LEFT) {
+                la[nl] = a;
+                lb[nl] = b;
+                nl++;
+            }
+            if (near->rail_side & ROAD_RAIL_SIDE_RIGHT) {
+                ra[nr] = a;
+                rb[nr] = b;
+                nr++;
+            }
+        }
+        {
+            float cycle = road_width_cycle_length(&active_config);
+            int k0 = (int)floorf((world_s - width_phase()) / cycle);
+            int k;
+
+            for (k = k0 - 1; k <= k0 + 1; k++) {
                 float a;
                 float b;
 
-                if (j < 0 || j >= count)
+                if (!narrow_rail_window(k, &a, &b))
                     continue;
-                near = at(j);
-                a = near->start_s - ROAD_RAIL_LEAD;
-                b = near->start_s + near->length + ROAD_RAIL_TRAIL;
-                if (s < a || s > b)
-                    continue;
-                if (near->rail_side & ROAD_RAIL_SIDE_LEFT)
-                    p.rail_limit_left = rail;
-                if (near->rail_side & ROAD_RAIL_SIDE_RIGHT)
-                    p.rail_limit_right = rail;
+                a -= world_offset;
+                b -= world_offset;
+                la[nl] = a;
+                lb[nl] = b;
+                nl++;
+                ra[nr] = a;
+                rb[nr] = b;
+                nr++;
             }
-            {
-                float cycle = road_width_cycle_length(&active_config);
-                int k0 = (int)floorf((world_s - width_phase()) / cycle);
-                int k;
+        }
+        if (nl > 0 && road_rail_union(s, la, lb, nl, &u0, &u1) &&
+            road_rail_ok(&p, s, u0, u1))
+            p.rail_limit_left = rail;
+        if (nr > 0 && road_rail_union(s, ra, rb, nr, &u0, &u1) &&
+            road_rail_ok(&p, s, u0, u1))
+            p.rail_limit_right = rail;
+    }
+    return p;
+}
 
-                for (k = k0 - 1; k <= k0 + 1; k++) {
-                    float a;
-                    float b;
+float road_rail_stop(float half_width)
+{
+    (void)half_width; /* the wheel face does not narrow with the road */
+    return ROAD_RAIL_STOP_FULL;
+}
 
-                    if (!narrow_rail_window(k, &a, &b))
-                        continue;
-                    if (world_s >= a && world_s <= b) {
-                        p.rail_limit_left = rail;
-                        p.rail_limit_right = rail;
-                    }
+bool road_rail_allowed(float half_width)
+{
+    return (half_width - ROAD_RAIL_STOP_FULL) >= ROAD_RAIL_MIN_CENTRE;
+}
+
+bool road_rail_ok(const road_sample_t *p, float s, float s0, float s1)
+{
+    if (!p)
+        return false;
+    /* Eligibility, NOT "stop > 0": the stop is a constant, so testing it
+     * would be always true and would draw a rail the car is not clamped by. */
+    return road_rail_allowed(p->half_width) &&
+           guardrail_beam_top(s, s0, s1) >= ROAD_RAIL_CLAMP_MIN_TOP;
+}
+
+bool road_rail_band_ok(const road_sample_t *a, float a_s,
+                       const road_sample_t *b, float b_s, float s0, float s1)
+{
+    /* Both endpoints, never the midpoint: no band may straddle the
+     * eligibility or visibility boundary. */
+    return road_rail_ok(a, a_s, s0, s1) && road_rail_ok(b, b_s, s0, s1);
+}
+
+bool road_rail_union(float s, const float *a, const float *b, int n, float *u0,
+                     float *u1)
+{
+    int i;
+    int changed = 1;
+    bool found = false;
+
+    if (!a || !b || !u0 || !u1 || n <= 0)
+        return false;
+    for (i = 0; i < n; i++) {
+        if (s >= a[i] && s <= b[i]) {
+            *u0 = a[i];
+            *u1 = b[i];
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+        return false;
+    while (changed) { /* absorb every window touching the union */
+        changed = 0;
+        for (i = 0; i < n; i++) {
+            if (a[i] <= *u1 && b[i] >= *u0) {
+                if (a[i] < *u0) {
+                    *u0 = a[i];
+                    changed = 1;
+                }
+                if (b[i] > *u1) {
+                    *u1 = b[i];
+                    changed = 1;
                 }
             }
         }
     }
-    return p;
+    return true;
+}
+
+bool road_rail_merge(float a0, float b0, float a1, float b1, float *o0,
+                     float *o1)
+{
+    if (!o0 || !o1)
+        return false;
+    if (b0 < a1 || b1 < a0)
+        return false; /* disjoint (touching windows merge) */
+    *o0 = (a0 < a1) ? a0 : a1;
+    *o1 = (b0 > b1) ? b0 : b1;
+    return true;
 }
 
 float road_rail_limit(const road_sample_t *p, int side)
@@ -1351,11 +1459,20 @@ static int rail_merge(road_rail_span_t *src, int n, road_rail_span_t *out)
         int start = m;
 
         for (i = 0; i < n; i++) {
+            float o0;
+            float o1;
+
             if (src[i].side != side)
                 continue;
-            if (m > start && src[i].s0 <= out[m - 1].s1 + 1e-3f) {
-                if (src[i].s1 > out[m - 1].s1)
-                    out[m - 1].s1 = src[i].s1;
+            /* One overlap rule for the collector and the sampler. The 1 mm
+             * slack absorbs float noise between two windows that touch; the
+             * union then takes the earlier start (always the open span here,
+             * because src is sorted by s0) and the later end. */
+            if (m > start &&
+                road_rail_merge(out[m - 1].s0, out[m - 1].s1,
+                                src[i].s0 - 1e-3f, src[i].s1, &o0, &o1)) {
+                out[m - 1].s0 = o0;
+                out[m - 1].s1 = o1;
                 out[m - 1].kind |= src[i].kind;
             } else {
                 out[m++] = src[i];
@@ -1366,11 +1483,120 @@ static int rail_merge(road_rail_span_t *src, int n, road_rail_span_t *out)
     return m;
 }
 
+/* ------------------------------------------------------- visible interval */
+
+/*
+ * The clamp span is the VISIBLE interval [v0, v1], not the grammar span: the
+ * 12 m rise/sink buries the beam at every span end, so a clamp on the grammar
+ * span would be an invisible wall. road_rail_ok() itself never calls
+ * road_sample(); this helper is where the collector supplies the sample.
+ */
+static bool rail_visible(float s, float s0, float s1)
+{
+    road_sample_t p = road_sample(s);
+
+    return road_rail_ok(&p, s, s0, s1);
+}
+
+/* ROAD_RAIL_BISECT_STEPS over a bracket of at most ROAD_RAIL_SCAN_STEP: the
+ * emitted boundary is the predicate boundary to 10/2^8 = 0.039 m, never a
+ * grid point, and the whole pass stays inside ROAD_RAIL_SAMPLE_BUDGET on the
+ * reference frame (car_s 1000: 192 calls), on the repository's 64-seed sweep
+ * (228) and on the sampled random-seed sweeps (279-290); the constant is a
+ * cost target, not a proof over every orbit. */
+static float rail_bisect_in(float a, float b, float s0, float s1,
+                            road_rail_visible_fn visible)
+{
+    int i;
+
+    for (i = 0; i < ROAD_RAIL_BISECT_STEPS; i++) {
+        float m = 0.5f * (a + b);
+
+        if (visible(m, s0, s1))
+            b = m;
+        else
+            a = m;
+    }
+    return b;
+}
+
+static float rail_bisect_out(float a, float b, float s0, float s1,
+                             road_rail_visible_fn visible)
+{
+    int i;
+
+    for (i = 0; i < ROAD_RAIL_BISECT_STEPS; i++) {
+        float m = 0.5f * (a + b);
+
+        if (visible(m, s0, s1))
+            a = m;
+        else
+            b = m;
+    }
+    return a;
+}
+
+int road_rail_visible_runs(float s0, float s1, road_rail_visible_fn visible,
+                           float *runs, int max_runs)
+{
+    const float step = ROAD_RAIL_SCAN_STEP;
+    float prev = s0;
+    float start = s0;
+    bool prev_ok;
+    bool open = false;
+    int n = 0;
+    float s;
+
+    if (!visible || !runs || max_runs <= 0 || s1 <= s0)
+        return 0;
+    prev_ok = visible(s0, s0, s1);
+    if (prev_ok) {
+        start = s0;
+        open = true;
+    }
+    for (s = s0 + step;; s += step) {
+        bool ok;
+
+        if (s > s1)
+            s = s1;
+        ok = visible(s, s0, s1);
+        if (ok && !prev_ok) {
+            /* false -> true: a NEW run, never a continuation of the previous
+             * one. Bridging the two would draw bands inside the gap, where
+             * rail_limit_* is 0: a drive-through rail of exactly the class
+             * the merged-union work exists to prevent. */
+            start = rail_bisect_in(prev, s, s0, s1, visible);
+            open = true;
+        } else if (!ok && prev_ok && open) {
+            float end = rail_bisect_out(prev, s, s0, s1, visible);
+
+            if (end > start && n < max_runs) {
+                runs[2 * n] = start;
+                runs[2 * n + 1] = end;
+                n++;
+            }
+            open = false;
+        }
+        prev = s;
+        prev_ok = ok;
+        if (s >= s1)
+            break;
+    }
+    if (open && n < max_runs) {
+        runs[2 * n] = start;
+        runs[2 * n + 1] = s1;
+        n++;
+    }
+    return n;
+}
+
 int road_rail_collect(float s0, float s1, road_rail_span_t *out, int max)
 {
     road_rail_span_t tmp[ROAD_RAIL_MAX_SPANS];
     int cap = (max < ROAD_RAIL_MAX_SPANS) ? max : ROAD_RAIL_MAX_SPANS;
     int n = 0;
+    int m;
+    int k;
     int i;
     float cycle;
 
@@ -1444,7 +1670,35 @@ int road_rail_collect(float s0, float s1, road_rail_span_t *out, int max)
     }
 
     rail_sort(tmp, n);
-    return rail_merge(tmp, n, out);
+    m = rail_merge(tmp, n, out);
+    /*
+     * MERGE FIRST, CLIP SECOND (M-3). Clipping before merging would leave the
+     * two pieces of a merged pair carrying their original s0/s1, so a later
+     * merge step would re-collapse or duplicate them and the count would
+     * silently go back to the pre-fix value. A merged span with no visible
+     * run has no clamp and is not drawn at all; one with SEVERAL runs (a false
+     * gap in the middle) becomes one emitted span per run, each keeping the
+     * grammar [s0, s1] for the envelope and its own [v0, v1]. tmp[] is free
+     * here (the window list has already been merged) and the pieces must not
+     * be written into out[] in place: a split can move k past i.
+     */
+    k = 0;
+    for (i = 0; i < m && k < cap; i++) {
+        float runs[2 * ROAD_RAIL_MAX_VISIBLE_RUNS];
+        int rn = road_rail_visible_runs(out[i].s0, out[i].s1, rail_visible,
+                                        runs, ROAD_RAIL_MAX_VISIBLE_RUNS);
+        int r;
+
+        for (r = 0; r < rn && k < cap; r++) {
+            tmp[k] = out[i];
+            tmp[k].v0 = runs[2 * r];
+            tmp[k].v1 = runs[2 * r + 1];
+            k++;
+        }
+    }
+    for (i = 0; i < k; i++)
+        out[i] = tmp[i];
+    return k;
 }
 
 bool road_next_curve(float from_s, float ahead, float min_curvature,

@@ -152,15 +152,34 @@ static bool line_clear(float eye_s, float eye_y, float sign_s, float target_y)
 static bool sign_visible(float eye_s, float eye_y, const sign_t *sign)
 {
     /* The lateral component does not change the terrain height: the asphalt
-     * and the 4.5 m shoulders share the road height across the whole width. */
-    return line_clear(eye_s, eye_y, sign->s, sign->road_height + 1.5f) &&
-           line_clear(eye_s, eye_y, sign->s, sign->road_height + 0.6f);
+     * and the 4.5 m shoulders share the road height across the whole width.
+     *
+     * ONE sight-line target, the panel bottom: the bottom is fixed at
+     * SIGNS_PANEL_BOTTOM at every scale and is the LOWEST line to the panel,
+     * so if it is blocked the panel is culled and if it is clear no higher
+     * line (centre or top) can be blocked. A third target would be dead code
+     * (plan 5.5/M-7). */
+    return line_clear(eye_s, eye_y, sign->s,
+                      sign->road_height + SIGNS_PANEL_BOTTOM);
 }
 
 /* ------------------------------------------------------------------ public */
 
-void signs_panel_axes(const sign_t *sign, sign_vec3_t *centre,
-                      sign_vec3_t *right, sign_vec3_t *up, sign_vec3_t *normal)
+/* One clamp for every consumer: a non-finite scale is the default and any
+ * other value is clamped into SIGNS_SCALE_MIN..SIGNS_SCALE_MAX, so the panel
+ * can never be built from an out-of-range (or zeroed) scale. */
+static float scale_clamped(float scale)
+{
+    if (!isfinite(scale))
+        return SIGNS_SCALE_DEFAULT;
+    if (scale < SIGNS_SCALE_MIN)
+        return SIGNS_SCALE_MIN;
+    if (scale > SIGNS_SCALE_MAX)
+        return SIGNS_SCALE_MAX;
+    return scale;
+}
+
+void signs_panel_frame(const sign_t *sign, sign_panel_t *out)
 {
     road_sample_t p;
     sign_vec3_t t3;
@@ -169,8 +188,9 @@ void signs_panel_axes(const sign_t *sign, sign_vec3_t *centre,
     float theta;
     float ct;
     float st;
+    float scale;
 
-    if (!sign)
+    if (!sign || !out)
         return;
     p = road_sample(sign->s);
     theta = atanf(sign->grade);
@@ -188,27 +208,41 @@ void signs_panel_axes(const sign_t *sign, sign_vec3_t *centre,
     u3.y = r3.z * t3.x - r3.x * t3.z;
     u3.z = r3.x * t3.y - r3.y * t3.x;
 
-    if (centre) {
-        centre->x = p.x + sign->lateral * r3.x;
-        centre->y = sign->road_height + 1.5f;
-        centre->z = p.z + sign->lateral * r3.z;
-    }
+    scale = scale_clamped(sign->panel_scale);
+    out->hu = SIGNS_PANEL_W * scale * 0.5f;
+    out->hv = SIGNS_PANEL_H * scale * 0.5f;
+    out->right = r3;
+    out->up = u3;
+    out->normal.x = -t3.x;
+    out->normal.y = -t3.y;
+    out->normal.z = -t3.z;
+    out->centre.x = p.x + sign->lateral * r3.x;
+    /* Fixed bottom at every scale: centre = bottom + half-height. */
+    out->centre.y = sign->road_height + SIGNS_PANEL_BOTTOM + out->hv;
+    out->centre.z = p.z + sign->lateral * r3.z;
+}
+
+void signs_panel_axes(const sign_t *sign, sign_vec3_t *centre,
+                      sign_vec3_t *right, sign_vec3_t *up, sign_vec3_t *normal)
+{
+    sign_panel_t f;
+
+    if (!sign)
+        return;
+    signs_panel_frame(sign, &f);
+    if (centre)
+        *centre = f.centre;
     if (right)
-        *right = r3;
+        *right = f.right;
     if (up)
-        *up = u3;
-    if (normal) {
-        normal->x = -t3.x;
-        normal->y = -t3.y;
-        normal->z = -t3.z;
-    }
+        *up = f.up;
+    if (normal)
+        *normal = f.normal;
 }
 
 bool signs_panel_corners(const sign_t *sign, sign_vec3_t out[4])
 {
-    sign_vec3_t c, r, u, n;
-    float hw = SIGNS_PANEL_W * 0.5f;
-    float hh = SIGNS_PANEL_H * 0.5f;
+    sign_panel_t f;
 
     if (!sign || !out)
         return false;
@@ -216,19 +250,19 @@ bool signs_panel_corners(const sign_t *sign, sign_vec3_t out[4])
         !isfinite(sign->road_height) || !isfinite(sign->heading) ||
         !isfinite(sign->grade))
         return false;
-    signs_panel_axes(sign, &c, &r, &u, &n);
-    out[0].x = c.x - hw * r.x + hh * u.x; /* TL */
-    out[0].y = c.y - hw * r.y + hh * u.y;
-    out[0].z = c.z - hw * r.z + hh * u.z;
-    out[1].x = c.x + hw * r.x + hh * u.x; /* TR */
-    out[1].y = c.y + hw * r.y + hh * u.y;
-    out[1].z = c.z + hw * r.z + hh * u.z;
-    out[2].x = c.x + hw * r.x - hh * u.x; /* BR */
-    out[2].y = c.y + hw * r.y - hh * u.y;
-    out[2].z = c.z + hw * r.z - hh * u.z;
-    out[3].x = c.x - hw * r.x - hh * u.x; /* BL */
-    out[3].y = c.y - hw * r.y - hh * u.y;
-    out[3].z = c.z - hw * r.z - hh * u.z;
+    signs_panel_frame(sign, &f);
+    out[0].x = f.centre.x - f.hu * f.right.x + f.hv * f.up.x; /* TL */
+    out[0].y = f.centre.y - f.hu * f.right.y + f.hv * f.up.y;
+    out[0].z = f.centre.z - f.hu * f.right.z + f.hv * f.up.z;
+    out[1].x = f.centre.x + f.hu * f.right.x + f.hv * f.up.x; /* TR */
+    out[1].y = f.centre.y + f.hu * f.right.y + f.hv * f.up.y;
+    out[1].z = f.centre.z + f.hu * f.right.z + f.hv * f.up.z;
+    out[2].x = f.centre.x + f.hu * f.right.x - f.hv * f.up.x; /* BR */
+    out[2].y = f.centre.y + f.hu * f.right.y - f.hv * f.up.y;
+    out[2].z = f.centre.z + f.hu * f.right.z - f.hv * f.up.z;
+    out[3].x = f.centre.x - f.hu * f.right.x - f.hv * f.up.x; /* BL */
+    out[3].y = f.centre.y - f.hu * f.right.y - f.hv * f.up.y;
+    out[3].z = f.centre.z - f.hu * f.right.z - f.hv * f.up.z;
     return true;
 }
 
@@ -265,22 +299,17 @@ static uv_quad_t bar(sign_uv_t p0, sign_uv_t p1, float half)
     return q;
 }
 
-typedef struct {
-    sign_vec3_t centre;
-    sign_vec3_t right;
-    sign_vec3_t up;
-    sign_vec3_t normal;
-} panel_frame_t;
-
 static sign_vec3_t panel_point(const panel_frame_t *f, sign_uv_t p)
 {
     sign_vec3_t out;
 
-    out.x = f->centre.x + p.u * 1.2f * f->right.x + p.v * 0.9f * f->up.x +
+    /* The half-extents come from the frame, never from frozen literals: with
+     * 1.2/0.9 a 1.5x panel would ship with 1x symbols. */
+    out.x = f->centre.x + p.u * f->hu * f->right.x + p.v * f->hv * f->up.x +
             0.02f * f->normal.x;
-    out.y = f->centre.y + p.u * 1.2f * f->right.y + p.v * 0.9f * f->up.y +
+    out.y = f->centre.y + p.u * f->hu * f->right.y + p.v * f->hv * f->up.y +
             0.02f * f->normal.y;
-    out.z = f->centre.z + p.u * 1.2f * f->right.z + p.v * 0.9f * f->up.z +
+    out.z = f->centre.z + p.u * f->hu * f->right.z + p.v * f->hv * f->up.z +
             0.02f * f->normal.z;
     return out;
 }
@@ -316,7 +345,7 @@ int signs_symbol_quads(const sign_t *sign, sign_quad_t *out, int max)
 
     if (!sign || !out || max <= 0)
         return 0;
-    signs_panel_axes(sign, &f.centre, &f.right, &f.up, &f.normal);
+    signs_panel_frame(sign, &f);
 
     switch (sign->type) {
     case SIGNS_CURVE_RIGHT:
@@ -384,11 +413,32 @@ int signs_symbol_quads(const sign_t *sign, sign_quad_t *out, int max)
     return count;
 }
 
+int signs_panel_verts(void)
+{
+    return 6;
+}
+
+int signs_post_verts(void)
+{
+    return 24;
+}
+
+int signs_base_verts(void)
+{
+    return signs_post_verts() + signs_panel_verts();
+}
+
+int signs_ink_verts(int quads)
+{
+    return quads > 0 ? 6 * quads : 0;
+}
+
 int signs_place(float car_s, float car_speed, float car_suspension,
-                sign_t *out, int max)
+                float panel_scale, sign_t *out, int max)
 {
     sign_event_t events[3];
     sign_t candidates[SIGNS_MAX_DRAWN * 2];
+    float scale = scale_clamped(panel_scale);
     float eye_s;
     float eye_y;
     float leads[2];
@@ -427,7 +477,12 @@ int signs_place(float car_s, float car_speed, float car_suspension,
             candidates[count].type = events[i].type;
             candidates[count].lanes = events[i].lanes;
             candidates[count].s = sign_s;
-            candidates[count].lateral = p.edge_half_width + SIGNS_LATERAL;
+            /* Anchored, not centred: the INNER edge sits SIGNS_PANEL_GAP
+             * from the drivable edge at every scale, so post and car
+             * clearance never move with the sign size. */
+            candidates[count].lateral = p.edge_half_width + SIGNS_PANEL_GAP +
+                                        SIGNS_PANEL_W * scale * 0.5f;
+            candidates[count].panel_scale = scale;
             candidates[count].road_height = p.height;
             candidates[count].heading = p.heading;
             candidates[count].grade = p.grade;

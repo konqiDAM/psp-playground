@@ -191,6 +191,22 @@ menu_action_t menu_update(menu_state_t *m, racing_settings_t *s,
         }
         break;
 
+    case MENU_ITEM_SIGN_SIZE:
+        /* Sensitivity semantics: step and clamp, never wrap. */
+        if (in->left) {
+            s->sign_scale_pct = clampi(s->sign_scale_pct - MENU_SIGN_STEP,
+                                       RACING_SETTINGS_SIGN_SCALE_MIN,
+                                       RACING_SETTINGS_SIGN_SCALE_MAX);
+            return MENU_ACTION_SAVE;
+        }
+        if (in->right) {
+            s->sign_scale_pct = clampi(s->sign_scale_pct + MENU_SIGN_STEP,
+                                       RACING_SETTINGS_SIGN_SCALE_MIN,
+                                       RACING_SETTINGS_SIGN_SCALE_MAX);
+            return MENU_ACTION_SAVE;
+        }
+        break;
+
     case MENU_ITEM_RESUME:
         if (in->accept) {
             m->open = false;

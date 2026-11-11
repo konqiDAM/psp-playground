@@ -52,4 +52,11 @@ float input_step(input_shaper_t *shaper, const racing_raw_input_t *raw,
 /* Convert a raw Lx sample through a captured centre and deadzone. */
 float input_analog_to_steer(int raw, int centre, int deadzone);
 
+/*
+ * Zero every steering/brake source when the run's controls are dead (the
+ * Time Attack clock has finished). The nub is parked on the calibrated centre
+ * so ANALOG mode maps to a zero steer instead of keeping the car turning.
+ */
+void input_gate_raw(racing_raw_input_t *raw, bool enabled, int centre);
+
 #endif /* RACING_INPUT_H */

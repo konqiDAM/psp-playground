@@ -11,9 +11,11 @@ Portable model: `signs.h` / `signs.c`. GU renderer: `signs_gu.c`. Host tests:
 - No new `.c`/`.h` files: the feature lives in the existing four roadsign files
   (`signs.h`, `signs.c`, `signs_gu.h`, `signs_gu.c`) plus this document, the
   test file and the new probe script.
-- `racing/render.c` is frozen; it already calls `signs_draw(car, settings)`
-  after `draw_posts()`. `racing/CMakeLists.txt` and `scripts/test.sh` are
-  frozen and already list the sign sources.
+- `racing/render.c` **is edited** by 0.8.0: the `signs_draw(car, settings)`
+  call moves **before** `guardrail_draw()` and `draw_posts()`, so both
+  depth-tested passes occlude a panel and its depth-less ink (HIGH-2), and the
+  same file carries Parts A and C of the release. `racing/CMakeLists.txt` and
+  `scripts/test.sh` still list the sign sources unchanged.
 - Do not edit `docs/RACING.md`, `docs/HANDOFF.md`, `README.md`, or any existing
   `scripts/check-racing-*.py`. Only `scripts/check-racing-signs.py` is new.
 - User mode only: no `pspkernel`, no `*ForKernel` imports.
@@ -73,24 +75,45 @@ Dedupe: candidates sorted by `s`, then any candidate within
 truncated to `SIGNS_MAX_DRAWN = 6` (a defensive assertion of the 3-event
 ceiling; the ceiling alone can never exceed it).
 
-Lateral placement: `edge_half_width + 2.4 m` on the **right** shoulder
-(`SIGNS_LATERAL`), i.e. 11.9 m at the default width; the 2.4 m panel spans
-10.7-13.1 m, so its inner edge is 0.6 m outside the marker-post line
-(`edge_half_width + 0.6` = 10.1 m) and the guardrail line (9.5 m) is farther
-inboard. A post at the sign's own `s` can therefore never sit behind the panel.
-A post at a different `s` can still project near the panel on a curve, which is
-why Task 5 compares the exact counters on the base and new EBOOT.
+Lateral placement (0.8.0): anchored at the verge, not centred —
+`lateral = edge_half_width + SIGNS_PANEL_GAP + SIGNS_PANEL_W*s/2` on the
+**right** shoulder. At 100 % that is `9.5 + 0.8 + 1.8` = **12.1 m**, so the
+panel spans 10.3-13.9 m and its inner edge is `edge + 0.8`. The **inner edge
+never moves with the scale**, which makes both clearances scale-invariant:
+
+| Envelope | Position | Clearance from the inner edge |
+|---|---:|---:|
+| marker post (`edge + 0.6 + 0.08*sqrt(2)`) | edge + 0.7131 | **0.087 m** |
+| car (`edge - 0.4 + 1.04` wheel face) | edge + 0.64 | **0.16 m** |
+
+The fixed 0.70 m panel bottom is below the 1.38 m car roof, so the lateral
+clearance is what keeps the panel out of the car. A post at the sign's own `s`
+can therefore never sit behind the panel; a post at a different `s` can still
+project near the panel on a curve, which is why the exact counters are compared
+on the base and new EBOOT.
 
 ## 3. Panel
 
+0.8.0 geometry: the panel is **1.5x** the 0.6.0 one and its bottom is fixed at
+every scale, so the post and car clearance are scale-invariant. `s` is
+`panel_scale` (0.60..1.60, clamped by `signs_place()`; non-finite -> 1.00).
+
 | Quantity | Value |
 |---|---:|
-| Width | 2.4 m |
-| Height | 1.8 m |
-| Top above local road height | 2.4 m |
-| Centre above local road height | 1.5 m |
-| Bottom above local road height | 0.6 m |
-| Post | 0.14 m half-width, 0.6 m tall, 4 side quads = 24 verts |
+| Width | `SIGNS_PANEL_W * s` = 3.6 m at 100 % |
+| Height | `SIGNS_PANEL_H * s` = 2.7 m at 100 % |
+| Bottom above local road height | `SIGNS_PANEL_BOTTOM` = **0.70 m, fixed** |
+| Top above local road height | `0.70 + H*s` = 3.40 m at 100 % |
+| Centre above local road height | `0.70 + H*s/2` = 2.05 m at 100 % |
+| Half-extents | `hu = W*s/2`, `hv = H*s/2` (in `sign_panel_t`) |
+| Post | 0.14 m half-width, **top = `road_height + SIGNS_PANEL_BOTTOM`**, 4 side quads = 24 verts |
+
+`signs_panel_frame()` is the **only** writer of the frame (`centre`, `right`,
+`up`, `normal`, `hu`, `hv`). `signs_panel_corners()` and `signs_symbol_quads()`
+both build through it, so the panel and its symbols can never scale apart;
+`signs_panel_axes()` is a thin wrapper for the pre-0.8.0 call shape. The post
+top is derived from the fixed bottom, **not** from `H*s` (which would put the
+post below the panel at 60 %).
 
 The panel is vertical in the road frame: width along the local right vector
 `R3 = (-cos ψ, 0, -sin ψ)`, height along `U3 = R3 × T3` where `T3` is the 3D
@@ -134,7 +157,9 @@ exact match would fail.
 Panel-local coordinates `u,v ∈ [-1,1]` (`u` = driver's right, `v` = up). One
 primitive: `bar(P0, P1, half_thickness)` = quad offset by ±`half_thickness`
 along the normalised perpendicular of `P1-P0`. Local → world:
-`C + u·1.2·R3 + v·0.9·U3 − 0.02·T3`.
+`C + u·hu·R3 + v·hv·U3 − 0.02·T3`, where `hu`/`hv` come from the panel frame.
+The 0.6.0 code froze these at `1.2`/`0.9` (the old panel's half-extents), which
+would have shipped a 1.5x panel with 1x symbols.
 
 | Type | Quads | Reading |
 |---|---:|---|
@@ -149,14 +174,22 @@ along the normalised perpendicular of `P1-P0`. Local → world:
 ## 6. Visibility (never draw a sign through a rise)
 
 Depth writes are enabled for the road, shoulder, post, sign and car passes
-(`sceGuDepthMask(GU_FALSE)`; only the ground layer uses `GU_TRUE`), so the
-depth buffer normally hides a sign behind the road. The 5 m road mesh can
-under-sample a crest lip between rows, so `signs.c` also culls a sign
-geometrically unless **both** sight lines are clear:
+(`sceGuDepthMask(GU_FALSE)`), so the depth buffer normally hides a sign behind
+the road. Three passes deliberately use `GU_TRUE` (no depth writes): the ground
+layer, the lane-dash + car-shadow decal block in `render.c`, and the sign-ink
+range in `signs_gu.c`. The 5 m road mesh can under-sample a crest lip between
+rows, so `signs.c` also culls a sign geometrically unless **one** sight line is
+clear:
 
-- to the panel centre (`road_height + 1.5`);
-- to the bottom-inner corner (`road_height + 0.6`), the edge closest to the
-  asphalt.
+- to the panel **bottom** (`road_height + SIGNS_PANEL_BOTTOM` = 0.70 m), which
+  is fixed at every sign scale.
+
+One target is enough because the bottom line is the **lowest** ray to the
+panel: at every sample `line_clear()` evaluates, the ray to the bottom lies
+below the ray to the centre or the top, so a blocked bottom line culls the
+panel and a clear bottom line implies no higher line can be blocked. A centre
+or top target would be dead code; the earlier three-target wording is
+withdrawn.
 
 This is a terrain test, not a general screen-overlap guarantee: a panel that
 covers road *beyond* it is correct (the panel is nearer) and is allowed.
@@ -166,8 +199,9 @@ Review Focus and the Task 1 test pin.
 Each line is sampled every 10 m from `eye_s + 10` to `sign_s - 4`, where
 `eye_s = car_s - (8.2 + 0.035|speed|)` and
 `eye_y = road_height(eye_s) + 3.1 + 0.006|speed| + 0.6·suspension` — the three
-terms are copied from `setup_3d()` (`racing/render.c:1158-1159`) so the model
-sees exactly the camera the frame uses. A sample fails when the line is below
+terms are copied from `setup_3d()` (`racing/render.c:1268-1270`, the `eye.y`
+assignment — the older `1158-1159` reference pointed into `draw_menu()`) so the
+model sees exactly the camera the frame uses. A sample fails when the line is below
 `road_height(s) + 0.05`. The bottom-edge test is what prevents a panel from
 being drawn over the crest road when its lower half is behind the rise; a sign
 therefore emerges over a crest as the geometry allows, which is physically
@@ -187,32 +221,65 @@ off the right edge.
 
 Focal length `f = 136 / tan(27.5°) = 261.3 px`; screen size 480 × 272.
 
+The shipped 0.8.0 panel is 3.6 × 2.7 m at 100 %, so every figure below is
+**1.5×** the 0.6.0 table (2.4 × 1.8 m, half-extents 1.2 / 0.9). **Scale rule:**
+all world sizes — and therefore all px figures — multiply by the sign-scale
+setting `s` (0.60…1.60); the distances at which a feature resolves scale
+inversely with `s`.
+
 | Feature | World size | 30 m | 40 m | 100 m |
 |---|---:|---:|---:|---:|
-| Panel width | 2.4 m | 20.9 px | 15.7 px | 6.3 px |
-| Panel height | 1.8 m | 15.7 px | 11.8 px | 4.7 px |
-| Stroke across a horizontal bar (v, `0.15` half-thickness) | 0.270 m | 2.4 px | 1.8 px | 0.7 px |
-| Stroke across a vertical bar (u, `0.15` half-thickness) | 0.360 m | 3.1 px | 2.4 px | 0.9 px |
-| Crest baseline (`0.07`) | 0.126 m (v) / 0.168 m (u) | 1.1–1.5 px | 0.8–1.1 px | 0.3–0.4 px |
+| Panel width | 3.6 m | 31.4 px | 23.5 px | 9.4 px |
+| Panel height | 2.7 m | 23.5 px | 17.6 px | 7.1 px |
+| Stroke across a horizontal bar (v, `0.15` half-thickness) | 0.405 m | 3.5 px | 2.6 px | 1.1 px |
+| Stroke across a vertical bar (u, `0.15` half-thickness) | 0.540 m | 4.7 px | 3.5 px | 1.4 px |
+| Crest baseline (`0.07`) | 0.189 m (v) / 0.252 m (u) | 1.6–2.2 px | 1.2–1.7 px | 0.5–0.7 px |
 
-The normalised half-thickness scales anisotropically (1.2 m in `u`, 0.9 m in
-`v`), so a diagonal bar is 0.27–0.36 m thick, not a uniform 0.36 m. Result: the
-**panel** is recognisable from ~100 m (6 px wide, full yellow), while the
-**symbol** resolves from ~40 m (1.7–2.4 px strokes) and is clear at 30 m (2.4–3.1
-px). The stroke is sub-pixel beyond ~100 m, so the symbol can rasterise as a
+The normalised half-thickness scales anisotropically (`hu` = 1.8 m in `u`,
+`hv` = 1.35 m in `v` at 100 %), so a diagonal bar is 0.405–0.54 m thick, not a
+uniform 0.54 m. Result: the **panel** is recognisable from ~100 m (9.4 px wide,
+full yellow), while the **symbol** resolves from ~60 m (1.8–2.4 px strokes) and
+is clear at 45 m (2.4–3.1 px). The stroke is sub-pixel beyond ~105 m, so the
+symbol can rasterise as a
 broken outline there; that is expected and no probe asserts ink beyond ~50 m. This is the documented limit of a 480 × 272 screen; the brief's 30–100 m
-range is met by "sign visible at 100 m, symbol legible from ~40 m".
+range is met by "sign visible at 100 m, symbol legible from ~60 m" (the 0.6.0
+wording said ~40 m; the 1.5x panel pushes that distance out by 1.5x).
 
 ## 8. Draw flow and budget
 
 ```text
 signs_draw(car, settings):
-    n = signs_place(car->s, car->speed, car->suspension, list, SIGNS_MAX)
+    scale = (float)settings->sign_scale_pct / 100.0f   /* SIGN SIZE, 60..160 % */
+    n = signs_place(car->s, car->speed, car->suspension, scale, list, SIGNS_MAX)
     for each sign:
         v = sceGuGetMemory(96 * sizeof(SignVtx)); if (!v) continue
-        write post (24 verts) + panel (6) + symbols (<= 36)
-        sceGuDrawArray(GU_TRIANGLES, 8888|32BITF|3D, count, NULL, v)
+        write post (24) + panel (6)                  -> n_base = 30
+        write symbols (<= 36)                        -> n_all   <= 66
+        sceGuDrawArray(GU_TRIANGLES, fmt, n_base, NULL, v)          /* base */
+        sceGuDisable(GU_DEPTH_TEST); sceGuDepthMask(GU_TRUE)        /* decal */
+        sceGuDrawArray(GU_TRIANGLES, fmt, n_all - n_base, NULL, v + n_base)
+        sceGuDepthMask(GU_FALSE); sceGuEnable(GU_DEPTH_TEST)
 ```
+
+`scale` is the persisted **SIGN SIZE** setting: `settings->sign_scale_pct`
+(`RACING.CFG` version 2, byte 9; 60…160 %, step 10, default 100 %), read once
+per frame by `signs_draw()` and clamped by `signs_place()` to
+`SIGNS_SCALE_MIN`..`SIGNS_SCALE_MAX` (non-finite -> `SIGNS_SCALE_DEFAULT`), so
+an out-of-range value can never reach the geometry. The file stays 16 bytes:
+version 2 reuses version 1's reserved byte 9, which stays inside the CRC.
+
+**Downgrading to 0.7.0 is data loss, not a compatibility nicety.** A 0.7.0
+build rejects version 2, resets to defaults, and rewrites the file as version 1
+on the next menu change: the sign size is gone, and a later 0.8.0 build
+re-defaults to 100 %. Version 1 files still load in 0.8.0 (byte 9 must be 0) at
+a 100 % sign scale, so the *upgrade* is lossless; only the downgrade is not.
+
+The ink is a depth-less decal (0.8.0 Part C): the 0.02 m lift is co-planar
+with the panel face at a 16-bit depth buffer, so the depth interaction is
+removed rather than tuned. `render_frame()` draws the signs **before** the
+guardrail and the marker posts, so both depth-tested passes occlude the panel
+*and* its depth-less ink; `scripts/check-racing-decal-order.py` pins that
+order and the state brackets.
 
 | Item | Limit |
 |---|---:|
@@ -234,8 +301,20 @@ signs_draw(car, settings):
 ## 9. Probe windows
 
 `scripts/check-racing-signs.py` runs one PPSSPPHeadless session with Cross held
-from 0.1 s and captures 0.5 / 2.0 / 2.5 / 4.0 s. Region x 250..356, y 88..151
-(right shoulder, above the road, left of the minimap).
+from 0.1 s and captures 0.5 / 2.0 / 2.5 / 4.0 s. Region x 250..359, y 88..151
+(the ROI's right edge 360 is exclusive; right shoulder, above the road, left of
+the minimap). The right edge moved 356 -> 359 in 0.8.0: the 1.5x panel at 2.5 s
+reaches x = 358, and a clipped
+bbox silently understates the width (measured 30 px clipped vs 32 px whole).
+Each capture runs in its own wiped `--memstick=` root into which the probe
+writes **exactly one** `RACING.CFG` — a version 2 file at the requested scale,
+or a deliberately rejected one (bad CRC, byte 9 = 200, version 1) for the
+fallback cases — and never reads one back, so no config from an earlier case
+and no probe-side version gate can change a capture. The root is therefore
+never "empty": the config it holds is the *input* under test, and the
+`--sign-scale` cases depend on it. The no-config path (a device's very first
+run, pure defaults) is deliberately **not** exercised here;
+`check-racing-030.py`'s save cases cover it.
 
 The car position at each capture is calibrated from roadside posts visible in
 the base build (measured x vs predicted x): s=40 post at x=327.5 (2.0 s,
@@ -244,16 +323,19 @@ x=291.0 (4.0 s, `car_s = 77.7`).
 
 | Capture | Sign | Measured panel | yellow | ink |
 |---|---|---|---:|---:|
-| 0.5 s | 52.28 | bbox (287,101)-(297,108), 11 × 8 px, centre (292, 104) | 70 | 15 |
-| 2.0 s | 52.28 | bbox (307,105)-(321,115), 15 × 11 px, centre (314, 110) | 96 | 43 |
-| 2.5 s | 52.28 | bbox (330,108)-(350,123), 21 × 16 px, centre (340, 115) | 219 | 68 |
-| 4.0 s | 112.28 | bbox (303,105)-(317,114), 15 × 10 px, centre (310, 109) | 108 | 33 |
+| 0.5 s | 52.28 | bbox (285,97)-(300,108), 16 × 12 px, centre (292, 102) | 120 | 48 |
+| 2.0 s | 52.28 | bbox (304,99)-(326,115), 23 × 17 px, centre (315, 107) | 242 | 88 |
+| 2.5 s | 52.28 | bbox (327,100)-(358,122), 32 × 23 px, centre (342, 111) | 451 | 151 |
+| 4.0 s | 112.28 | bbox (301,99)-(322,114), 22 × 16 px, centre (311, 106) | 223 | 79 |
 
-These are the Task 4 calibration measurements on the first green build. The
-probe's `EXPECT` is tightened to ±3 px on the centre, ±2 px on the size, and
-yellow/ink floors at 60 % of the measured values (42/58/131/65 yellow,
-25/40 ink), so a panel can lose ~40 % of its pixels before the probe fails;
-a range may only ever be narrowed. A yellow *island* enclosed by the symbol is
+These are the 0.8.0 measurements (1.5x panel at the verge) on the release
+EBOOT. The boxes are 1.45-1.53x the 0.6.0 ones (11x8 / 15x11 / 21x16 / 15x10),
+the centre moves +1..+2 px in x and 2-4 px **higher on screen** (the panel
+centre rises 1.5 -> 2.05 m). The probe's `EXPECT` is tightened to ±3 px on the
+centre, ±2 px on the size, and yellow floors at ~60 % of the measured values
+(72/145/270/134); the ink floors are the 0.6.0 ones x1.5 (25 -> 37, 40 -> 60),
+so a panel can lose ~40 % of its pixels before the probe fails; a range may
+only ever be narrowed. A yellow *island* enclosed by the symbol is
 part of the same panel and is ignored by the second-cluster rule. The
 emission-window cull is not probed (a behind-camera sign is near-plane clipped
 regardless); it is covered by the host test `test_window_and_reverse()`.

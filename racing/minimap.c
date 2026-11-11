@@ -8,10 +8,6 @@
 
 #include "road.h"
 
-/* Shorter than this and a contour segment has no usable direction (two
- * samples clamped onto the same map-edge point): draw a dot instead. */
-#define MINIMAP_MIN_SEGMENT 1e-4f
-
 static float clampf(float value, float low, float high)
 {
     if (value < low)
@@ -23,20 +19,22 @@ static float clampf(float value, float low, float high)
 
 static void project_point(float qx, float qz, float car_x, float car_z,
                           float tx, float tz, float rx, float rz, float cx,
-                          float cy, float sx, float sy, float x0, float y0,
-                          float x1, float y1, float *out_x, float *out_y)
+                          float cy, float sx, float sy, float clamp_x0,
+                          float clamp_y0, float clamp_x1, float clamp_y1,
+                          float *out_x, float *out_y)
 {
     float dx = qx - car_x;
     float dz = qz - car_z;
     float side = dx * rx + dz * rz;
     float forward = dx * tx + dz * tz;
 
-    *out_x = clampf(cx + side * sx, x0 - 8.0f, x1 + 8.0f);
-    *out_y = clampf(cy - forward * sy, y0 - 8.0f, y1 + 8.0f);
+    *out_x = clampf(cx + side * sx, clamp_x0, clamp_x1);
+    *out_y = clampf(cy - forward * sy, clamp_y0, clamp_y1);
 }
 
 void minimap_build(const car_state_t *car, float x0, float y0, float x1,
-                   float y1, minimap_strip_t *out)
+                   float y1, float clamp_x0, float clamp_y0, float clamp_x1,
+                   float clamp_y1, minimap_strip_t *out)
 {
     road_sample_t car_p = road_sample(car->s);
     float h = car_p.heading;
@@ -56,6 +54,7 @@ void minimap_build(const car_state_t *car, float x0, float y0, float x1,
     out->count = MINIMAP_SAMPLES;
     out->car_x = cx;
     out->car_y = cy;
+    out->panel_cx = (clamp_x0 + clamp_x1) * 0.5f;
 
     for (i = 0; i < MINIMAP_SAMPLES; i++) {
         float s = car->s - MINIMAP_BEHIND +
@@ -69,13 +68,17 @@ void minimap_build(const car_state_t *car, float x0, float y0, float x1,
         float rzw = p.z + p.edge_half_width * rpz;
 
         project_point(lx, lz, car_x, car_z, tx, tz, rx, rz, cx, cy, sx, sy,
-                      x0, y0, x1, y1, &out->left_x[i], &out->left_y[i]);
+                      clamp_x0, clamp_y0, clamp_x1, clamp_y1,
+                      &out->left_x[i], &out->left_y[i]);
         project_point(rxw, rzw, car_x, car_z, tx, tz, rx, rz, cx, cy, sx, sy,
-                      x0, y0, x1, y1, &out->right_x[i], &out->right_y[i]);
+                      clamp_x0, clamp_y0, clamp_x1, clamp_y1,
+                      &out->right_x[i], &out->right_y[i]);
     }
 
-    out->has_curve = road_next_curve(car->s, MINIMAP_AHEAD, MINIMAP_CURVE_MIN,
-                                     &out->curve_distance,
+    /* The warning distance is the HUD's 120 m, not the 250 m map window: the
+     * map must never move the `R/L nnnM` text out to 250 m. */
+    out->has_curve = road_next_curve(car->s, MINIMAP_WARN_AHEAD,
+                                     MINIMAP_CURVE_MIN, &out->curve_distance,
                                      &out->curve_curvature);
     if (!out->has_curve) {
         out->curve_distance = 0.0f;
@@ -83,72 +86,56 @@ void minimap_build(const car_state_t *car, float x0, float y0, float x1,
     }
 }
 
-void minimap_contour(const minimap_strip_t *map, minimap_point_t *points)
+/*
+ * Widen one sample pair to the minimum drawn width, INWARD. The point nearer
+ * the panel border is the pair's outer extreme and stays where the projection
+ * put it; the other moves toward the panel centre, so the widened pair can
+ * never leave the panel rect the projection clamped to. The sign of
+ * (right_x - left_x) is preserved, so a U-turn sample whose edges swapped
+ * stays swapped (culling is off, so a reversed pair still fills).
+ */
+static void widen_pair(float centre_x, minimap_point_t *left,
+                       minimap_point_t *right)
 {
-    int i;
+    float width = right->x - left->x;
+    float left_off;
+    float right_off;
 
-    for (i = 0; i < MINIMAP_SAMPLES; i++) {
-        points[i].x = map->left_x[i];
-        points[i].y = map->left_y[i];
+    if (fabsf(width) >= MINIMAP_MIN_WIDTH)
+        return;
+    left_off = fabsf(left->x - centre_x);
+    right_off = fabsf(right->x - centre_x);
+    if (width == 0.0f) {
+        /* Both edges landed on one point: grow toward the panel centre. */
+        if (left->x > centre_x)
+            left->x -= MINIMAP_MIN_WIDTH;
+        else
+            right->x += MINIMAP_MIN_WIDTH;
+        return;
     }
-    for (i = 0; i < MINIMAP_SAMPLES; i++) {
-        points[MINIMAP_SAMPLES + i].x = map->right_x[MINIMAP_SAMPLES - 1 - i];
-        points[MINIMAP_SAMPLES + i].y = map->right_y[MINIMAP_SAMPLES - 1 - i];
-    }
+    if (left_off >= right_off)
+        right->x = left->x + (width < 0.0f ? -MINIMAP_MIN_WIDTH
+                                           : MINIMAP_MIN_WIDTH);
+    else
+        left->x = right->x - (width < 0.0f ? -MINIMAP_MIN_WIDTH
+                                           : MINIMAP_MIN_WIDTH);
 }
 
-/*
- * One thin quad per closed segment, as two triangles. Each quad is extended
- * by half a thickness past both ends so neighbouring quads overlap at the
- * joints; a degenerate (clamped-away) segment falls back to a square dot
- * instead of dividing by a zero length.
- */
-int minimap_outline(const minimap_strip_t *map, float thickness,
-                    minimap_point_t *out)
+int minimap_ribbon(const minimap_strip_t *map, minimap_point_t *out)
 {
-    minimap_point_t pts[MINIMAP_CONTOUR_POINTS];
-    float half = thickness * 0.5f;
     int i;
 
-    minimap_contour(map, pts);
-    for (i = 0; i < MINIMAP_OUTLINE_SEGMENTS; i++) {
-        const minimap_point_t *a = &pts[i];
-        const minimap_point_t *b = &pts[(i + 1) % MINIMAP_CONTOUR_POINTS];
-        float dx = b->x - a->x;
-        float dy = b->y - a->y;
-        float len = sqrtf(dx * dx + dy * dy);
-        float ux = 1.0f;
-        float uy = 0.0f;
-        float nx;
-        float ny;
-        float ax;
-        float ay;
-        float bx;
-        float by;
-        minimap_point_t *v = &out[i * 6];
+    for (i = 0; i < MINIMAP_SAMPLES; i++) {
+        minimap_point_t left;
+        minimap_point_t right;
 
-        if (len > MINIMAP_MIN_SEGMENT) {
-            ux = dx / len;
-            uy = dy / len;
-        }
-        nx = -uy;
-        ny = ux;
-        /* Extend by half a thickness along the segment, at both ends. */
-        ax = a->x - ux * half;
-        ay = a->y - uy * half;
-        bx = b->x + ux * half;
-        by = b->y + uy * half;
-
-        v[0].x = ax + nx * half;
-        v[0].y = ay + ny * half;
-        v[1].x = bx + nx * half;
-        v[1].y = by + ny * half;
-        v[2].x = bx - nx * half;
-        v[2].y = by - ny * half;
-        v[3] = v[0];
-        v[4] = v[2];
-        v[5].x = ax - nx * half;
-        v[5].y = ay - ny * half;
+        left.x = map->left_x[i];
+        left.y = map->left_y[i];
+        right.x = map->right_x[i];
+        right.y = map->right_y[i];
+        widen_pair(map->panel_cx, &left, &right);
+        out[2 * i] = left;
+        out[2 * i + 1] = right;
     }
-    return MINIMAP_OUTLINE_VERTS;
+    return MINIMAP_VERTS;
 }

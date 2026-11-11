@@ -172,3 +172,13 @@ float input_step(input_shaper_t *shaper, const racing_raw_input_t *raw,
     shaper->steer = shaper->command;
     return shaper->steer;
 }
+
+void input_gate_raw(racing_raw_input_t *raw, bool enabled, int centre)
+{
+    if (!raw || enabled)
+        return;
+    raw->left = false;
+    raw->right = false;
+    raw->brake = false;
+    raw->nub_lx = centre;
+}

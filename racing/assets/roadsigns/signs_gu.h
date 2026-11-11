@@ -12,7 +12,11 @@
 #include "physics.h"
 #include "settings.h"
 
-/* Draw the signs visible around the car. Called from render_frame(). */
+/*
+ * Draw the signs visible around the car. Called from render_frame(); the
+ * panel and post are depth-tested, the symbol ink is drawn as a depth-less
+ * decal (see draw_sign()).
+ */
 void signs_draw(const car_state_t *car, const racing_settings_t *settings);
 
 #endif /* RACING_SIGNS_GU_H */

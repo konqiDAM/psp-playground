@@ -17,12 +17,15 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
+#include "hiscore.h"
 #include "input.h"
 #include "menu.h"
 #include "physics.h"
 #include "render.h"
 #include "road.h"
+#include "score.h"
 #include "settings.h"
 #include "storage.h"
 #include "telemetry.h"
@@ -74,7 +77,27 @@ static void read_menu_edges(const SceCtrlData *pad, uint32_t pressed,
     menu_in->cancel = (pressed & PSP_CTRL_SQUARE) != 0;
     menu_in->menu = (pressed & PSP_CTRL_SELECT) != 0;
     menu_in->start = (pressed & PSP_CTRL_START) != 0;
+    menu_in->page_prev = (pressed & PSP_CTRL_LTRIGGER) != 0;
+    menu_in->page_next = (pressed & PSP_CTRL_RTRIGGER) != 0;
     (void)pad;
+}
+
+static void reset_run_state(car_state_t *car, telemetry_state_t *telemetry,
+                            input_shaper_t *shaper, menu_state_t *menu,
+                            road_warning_t *warnings, float *steer_bar,
+                            bool *suppress, bool *menu_was_open)
+{
+    car_reset(car);
+    telemetry_reset(telemetry);
+    input_reset(shaper);
+    menu_reset(menu);
+    warnings->narrow = false;
+    warnings->narrow_distance = 0.0f;
+    warnings->crest = false;
+    warnings->crest_distance = 0.0f;
+    *steer_bar = 0.0f;
+    *suppress = false;
+    *menu_was_open = false;
 }
 
 int main(void)
@@ -95,14 +118,27 @@ int main(void)
     bool menu_was_open;
     float steer_bar = 0.0f;
     int mode = 0; /* 0 = welcome, 1 = game */
+    score_run_t score;
+    hiscore_book_t hiscore;
+    hiscore_result_t result;
+    uint32_t run_seed = ROAD_SEED;
+    bool result_done = false;
+    bool hiscore_save_failed = false; /* sticky until a save succeeds */
+    bool hiscore_dirty = false;
 
     setup_callbacks();
     sceCtrlSetSamplingCycle(0);
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 
     storage_load_settings(&settings);
+    /* A missing or corrupt RACING.HOF/.BAK leaves an empty book, which is
+     * exactly "no scores yet": the leaderboard shows NO RUNS YET and the next
+     * successful save rewrites the file. Accepted limitation, SPEC §7. */
+    (void)storage_load_hiscore(&hiscore);
     road_config_defaults(&terrain);
     welcome_reset(&welcome, &terrain);
+    memset(&result, 0, sizeof(result));
+    score_reset(&score, false);
     car_reset(&car);
     telemetry_reset(&telemetry);
     input_reset(&shaper);
@@ -140,26 +176,44 @@ int main(void)
 
         if (mode == 0) {
             welcome_action_t welcome_action =
-                welcome_update(&welcome, &terrain, &menu_in);
+                welcome_update(&welcome, &terrain, &hiscore, &menu_in);
 
             if (welcome_action == WELCOME_ACTION_START) {
-                uint32_t seed = road_next_start_seed(&seed_state);
-
-                road_reset_config(seed, &terrain);
-                car_reset(&car);
-                telemetry_reset(&telemetry);
-                input_reset(&shaper);
-                menu_reset(&menu);
-                warnings.narrow = false;
-                warnings.crest = false;
-                steer_bar = 0.0f;
-                suppress = false;
-                menu_was_open = false;
+                run_seed = road_next_start_seed(&seed_state);
+                road_reset_config(run_seed, &terrain);
+                reset_run_state(&car, &telemetry, &shaper, &menu, &warnings,
+                                &steer_bar, &suppress, &menu_was_open);
+                score_reset(&score,
+                            welcome.mode == WELCOME_MODE_FREE_DRIVE);
+                result_done = false;
                 mode = 1;
             }
 
-            render_welcome(&welcome, &terrain);
+            render_welcome(&welcome, &terrain, &hiscore, hiscore_save_failed);
             continue;
+        }
+
+        if (score_finished(&score) && !menu.open) {
+            if (pressed & PSP_CTRL_START) {
+                mode = 0;
+                welcome_restart(&welcome);
+                menu_reset(&menu);
+                input_reset(&shaper);
+                steer_bar = 0.0f;
+                suppress = false;
+                menu_was_open = false;
+                render_welcome(&welcome, &terrain, &hiscore, hiscore_save_failed);
+                continue;
+            }
+            if (pressed & PSP_CTRL_CROSS) {
+                /* Retry the SAME seed: no seed_state advance. */
+                road_reset_config(run_seed, &terrain);
+                reset_run_state(&car, &telemetry, &shaper, &menu, &warnings,
+                                &steer_bar, &suppress, &menu_was_open);
+                score_reset(&score, false);
+                result_done = false;
+                continue;
+            }
         }
 
         action = menu_update(&menu, &settings, &menu_in, (int)pad.Lx,
@@ -176,7 +230,7 @@ int main(void)
             steer_bar = 0.0f;
             suppress = false;
             menu_was_open = false;
-            render_welcome(&welcome, &terrain);
+            render_welcome(&welcome, &terrain, &hiscore, hiscore_save_failed);
             continue;
         }
         if (action == MENU_ACTION_SAVE)
@@ -192,14 +246,16 @@ int main(void)
         }
 
         if (!menu.open) {
+            bool controls = !score_finished(&score);
+
             raw.left = (pad.Buttons & PSP_CTRL_LEFT) != 0;
             raw.right = (pad.Buttons & PSP_CTRL_RIGHT) != 0;
             raw.nub_lx = (int)pad.Lx;
-            raw.brake =
-                (pad.Buttons & PSP_CTRL_SQUARE) != 0 && !suppress;
+            raw.brake = (pad.Buttons & PSP_CTRL_SQUARE) != 0 && !suppress;
+            input_gate_raw(&raw, controls, settings.analog_centre);
 
-            input.throttle =
-                (pad.Buttons & PSP_CTRL_CROSS) != 0 && !suppress;
+            input.throttle = controls &&
+                             (pad.Buttons & PSP_CTRL_CROSS) != 0 && !suppress;
             input.steer = input_step(&shaper, &raw, &settings, dt);
             input.brake = shaper.brake_level;
             input.boost = shaper.boost_timer > 0.0f ? 1.0f : 0.0f;
@@ -213,6 +269,31 @@ int main(void)
             }
             road_warnings(car.s, &warnings);
             telemetry_step(&telemetry, &car, dt);
+
+            score_step(&score, input.throttle, car.ds, dt);
+
+            if (score_finished(&score) && !result_done) {
+                int year = 0;
+                int month = 0;
+                int day = 0;
+
+                storage_read_date(&year, &month, &day);
+                hiscore_entry_from_run(&result.entry, score.distance_m,
+                                       run_seed, &terrain, year, month, day);
+                {
+                    bool needs_save = false;
+                    bool saved_ok = false;
+
+                    result.rank = hiscore_commit(&hiscore, &result.entry,
+                                                 &needs_save);
+                    if (needs_save)
+                        saved_ok = storage_save_hiscore(&hiscore);
+                    hiscore_dirty = hiscore_dirty_after(hiscore_dirty,
+                                                        needs_save, saved_ok);
+                    hiscore_save_failed = hiscore_dirty;
+                }
+                result_done = true;
+            }
         }
 
         if (suppress &&
@@ -229,6 +310,10 @@ int main(void)
         view.raw_lx = (int)pad.Lx;
         view.raw_ly = (int)pad.Ly;
         view.settings_save_failed = save_failed;
+        view.score = &score;
+        view.hiscore = &hiscore;
+        view.result = result_done ? &result : NULL;
+        view.hiscore_save_failed = hiscore_save_failed;
 
         render_frame(&view, menu.open ? 0.0f : dt);
     }

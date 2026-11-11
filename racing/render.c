@@ -23,7 +23,9 @@
 
 #include "font.h"
 #include "input.h"
+#include "hiscore.h"
 #include "minimap.h"
+#include "score.h"
 #include "road.h"
 
 #include "assets/guardrail/guardrail_gu.h"
@@ -34,12 +36,12 @@
 #define BUF_W 512
 #define FB_SIZE (BUF_W * SCREEN_H * 4)
 
-#define MAX_HUD_VERTS 4096
-#define MAX_MAP_VERTS 512
+#define MAX_HUD_VERTS 8192
+#define MAX_MAP_VERTS 64
 
-/* 288 outline + 3 car marker + 3 chevron. */
-#if (MINIMAP_OUTLINE_VERTS + 6) > MAX_MAP_VERTS
-#error "minimap outline does not fit MAX_MAP_VERTS"
+/* 48 ribbon (2 x 24 samples) + 3 car marker + 3 chevron. */
+#if (MINIMAP_VERTS + MINIMAP_MARKER_VERTS + MINIMAP_CHEVRON_VERTS) > MAX_MAP_VERTS
+#error "minimap ribbon does not fit MAX_MAP_VERTS"
 #endif
 
 #define RGB(r, g, b)                                                           \
@@ -68,7 +70,7 @@
 #define COL_HUD_LABEL RGB(0xB0, 0xC0, 0xC8)
 #define COL_HUD_TEXT RGB(0xF0, 0xF4, 0xF8)
 #define COL_HUD_ACCENT RGB(0xFF, 0xE0, 0x40)
-#define COL_MAP_EDGE RGB(0xC0, 0xC8, 0xD0)
+#define COL_MAP_FILL RGB(0x9C, 0xAE, 0xC0)
 #define COL_HUD_WARN RGB(0xFF, 0x90, 0x20)
 #define COL_HUD_SLIP RGB(0xFF, 0x50, 0x30)
 #define COL_SHADOW 0x38000000u
@@ -80,6 +82,16 @@
 #define V2D_FMT (GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D)
 
 #define MAX_CAR_VERTS 2048
+
+/*
+ * Lane dashes are drawn as depth-less decals (0.8.0, Part C), so a dash beyond
+ * a crest would paint over the crest and the ground fan. Emitting only the
+ * nearest 120 m bounds that artefact: a 0.15 m dash is 0.33 px wide at 120 m
+ * (f = 261.3 px; 0.6 px is the ~65 m value), so the residual is sub-pixel, and
+ * the far dashes are invisible anyway. Kept here rather than road.h so the rail
+ * branch's road.h edit stays disjoint (see the 0.8.0 plan section 4).
+ */
+#define ROAD_DASH_AHEAD 120.0f
 
 /*
  * Ground fan. The PSP GE does not clip laterally: a primitive with a vertex
@@ -112,7 +124,7 @@ typedef struct {
     float x, y, z;
 } P3;
 
-static uint32_t display_list[65536] __attribute__((aligned(64)));
+static uint32_t display_list[98304] __attribute__((aligned(64)));
 static uint32_t road_tex[ROAD_TEXTURE_X * ROAD_TEXTURE_Y]
     __attribute__((aligned(16)));
 static Vtx car_mesh[MAX_CAR_VERTS] __attribute__((aligned(16)));
@@ -120,7 +132,7 @@ static int car_mesh_count;
 static Vtx hud_verts[MAX_HUD_VERTS] __attribute__((aligned(16)));
 static int hud_count;
 static Vtx map_verts[MAX_MAP_VERTS] __attribute__((aligned(16)));
-static minimap_point_t map_outline[MINIMAP_OUTLINE_VERTS];
+static minimap_point_t map_ribbon[MINIMAP_VERTS];
 static float cam_lat;
 static float view_x;
 static float view_z;
@@ -603,9 +615,10 @@ static void draw_shadow(float car_s, float car_x, float car_z, float yaw)
     v[4] = v[0];
     v[5] = v[2];
 
-    sceGuDepthMask(GU_TRUE);
+    /* No depth writes (and no depth test - the caller brackets this call with
+     * the decal state). The car, guardrail and posts drawn afterwards still
+     * occlude the shadow. */
     sceGuDrawArray(GU_TRIANGLES, V3D_FMT, 6, NULL, v);
-    sceGuDepthMask(GU_FALSE);
 }
 
 static void draw_car(const car_state_t *car, float car_x, float car_y,
@@ -717,6 +730,32 @@ static void format_metric(char *buf, const char *label, int value,
     *buf = '\0';
 }
 
+/* 12345 dm -> "1234.5" (one decimal, no float rounding surprises). */
+static void format_dm(char *buf, int dm)
+{
+    char whole[12];
+
+    format_int(whole, dm / 10);
+    strcpy(buf, whole);
+    strcat(buf, ".");
+    {
+        size_t n = strlen(buf);
+
+        buf[n] = (char)('0' + (dm % 10));
+        buf[n + 1] = '\0';
+    }
+}
+
+static void format_seed(char *buf, uint32_t seed)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    int shift;
+
+    for (shift = 28; shift >= 0; shift -= 4)
+        *buf++ = hex[(seed >> shift) & 0xFu];
+    *buf = '\0';
+}
+
 static void format_g(char *buf, const char *label, float value)
 {
     while (*label)
@@ -810,13 +849,40 @@ static void draw_hud(const render_frame_args_t *args)
                  COL_HUD_WARN);
     }
 
-    format_metric(text, "DIST", (int)(telemetry->distance_m + 0.5f), "M");
-    hud_text(text, (float)(468 - font_text_width(text, 1)), 86.0f, 1,
-             COL_HUD_TEXT);
+    {
+        float shown = telemetry->distance_m;
+
+        if (args->score && args->score->state != SCORE_STATE_FREE)
+            shown = args->score->distance_m;
+        format_metric(text, "DIST", (int)(shown + 0.5f), "M");
+        hud_text(text, (float)(468 - font_text_width(text, 1)), 86.0f, 1,
+                 COL_HUD_TEXT);
+    }
     format_metric(text, "MAX", (int)(telemetry->max_speed * 3.6f + 0.5f),
                   "KM/H");
     hud_text(text, (float)(468 - font_text_width(text, 1)), 96.0f, 1,
              COL_HUD_TEXT);
+
+    if (args->score && args->score->state != SCORE_STATE_FREE &&
+        !args->result) {
+        float remaining = score_remaining(args->score);
+        float bar = 112.0f * remaining / SCORE_RUN_SECONDS;
+        uint32_t value_colour = (remaining <= 10.0f) ? COL_HUD_WARN
+                                                     : COL_HUD_TEXT;
+
+        if (bar < 0.0f)
+            bar = 0.0f;
+        if (bar > 112.0f)
+            bar = 112.0f;
+
+        hud_rect(176.0f, 40.0f, 128.0f, 28.0f, COL_HUD_PANEL);
+        hud_text("TIME", 184.0f, 44.0f, 1, COL_HUD_LABEL);
+        format_fixed1(text, remaining);
+        hud_text(text, 184.0f, 53.0f, 2, value_colour);
+        hud_rect(184.0f, 66.0f, 112.0f, 4.0f, 0x80000000u);
+        if (bar > 0.0f)
+            hud_rect(184.0f, 66.0f, bar, 4.0f, COL_HUD_ACCENT);
+    }
 
     if (settings->gmeter) {
         float lat = telemetry->lat_g;
@@ -862,7 +928,7 @@ static void draw_hud(const render_frame_args_t *args)
         hud_rect(360.0f, 118.0f, 112.0f, 106.0f, COL_HUD_PANEL);
         hud_rect(360.0f, 224.0f, 112.0f, 8.0f, COL_HUD_PANEL);
         hud_text("MAP", 366.0f, 122.0f, 1, COL_HUD_LABEL);
-        if (road_next_curve(car->s, MINIMAP_AHEAD, MINIMAP_CURVE_MIN,
+        if (road_next_curve(car->s, MINIMAP_WARN_AHEAD, MINIMAP_CURVE_MIN,
                             &curve_distance, &curve_curvature)) {
             char number[12];
             char *p = number;
@@ -916,24 +982,24 @@ static void draw_minimap(const render_frame_args_t *args)
     minimap_strip_t map;
     Vtx *v;
     int i;
-    int marker_offset = MINIMAP_OUTLINE_VERTS;
-    int chevron_offset = marker_offset + 3;
-    int total = chevron_offset + 3;
+    int marker_offset = MINIMAP_VERTS;
+    int chevron_offset = marker_offset + MINIMAP_MARKER_VERTS;
+    int total = chevron_offset + MINIMAP_CHEVRON_VERTS;
     uint32_t marker_colour;
 
     if (!args->settings->minimap)
         return;
 
-    minimap_build(args->car, 366.0f, 132.0f, 466.0f, 218.0f, &map);
-    if (map.count != MINIMAP_SAMPLES)
+    /* Map rect (scale) 366,132,466,218; panel rect (clamp) 360,118,472,224. */
+    minimap_build(args->car, 366.0f, 132.0f, 466.0f, 218.0f, 360.0f, 118.0f,
+                  472.0f, 224.0f, &map);
+    /* No map.count guard: minimap_build() always writes MINIMAP_SAMPLES, and
+     * minimap_ribbon() below is the call that actually depends on it. */
+    if (minimap_ribbon(&map, map_ribbon) != MINIMAP_VERTS)
         return;
-
-    if (minimap_outline(&map, MINIMAP_EDGE_THICKNESS, map_outline) !=
-        MINIMAP_OUTLINE_VERTS)
-        return;
-    for (i = 0; i < MINIMAP_OUTLINE_VERTS; i++)
-        map_set(&map_verts[i], map_outline[i].x, map_outline[i].y,
-                COL_MAP_EDGE);
+    /* Culling is off, so a U-turn sample whose edges swap still fills. */
+    for (i = 0; i < MINIMAP_VERTS; i++)
+        map_set(&map_verts[i], map_ribbon[i].x, map_ribbon[i].y, COL_MAP_FILL);
 
     marker_colour = car_is_offroad(args->car) ? COL_HUD_WARN : COL_HUD_TEXT;
     map_set(&map_verts[marker_offset + 0], map.car_x, map.car_y - 6.0f,
@@ -967,17 +1033,102 @@ static void draw_minimap(const render_frame_args_t *args)
     if (!v)
         return;
     memcpy(v, map_verts, (size_t)total * sizeof(Vtx));
-    sceGuDrawArray(GU_TRIANGLES, V2D_FMT, MINIMAP_OUTLINE_VERTS, NULL, v);
-    sceGuDrawArray(GU_TRIANGLES, V2D_FMT, 3, NULL, v + marker_offset);
+    sceGuDrawArray(GU_TRIANGLE_STRIP, V2D_FMT, MINIMAP_VERTS, NULL, v);
+    sceGuDrawArray(GU_TRIANGLES, V2D_FMT, MINIMAP_MARKER_VERTS, NULL,
+                   v + marker_offset);
     if (map.has_curve)
-        sceGuDrawArray(GU_TRIANGLES, V2D_FMT, 3, NULL, v + chevron_offset);
+        sceGuDrawArray(GU_TRIANGLES, V2D_FMT, MINIMAP_CHEVRON_VERTS, NULL,
+                       v + chevron_offset);
+}
+
+/* ---------------------------------------------------------- result panel */
+
+#define CARD_X 76.0f
+#define CARD_Y 48.0f
+#define CARD_W 264.0f
+#define CARD_H 176.0f
+#define CARD_CX (CARD_X + CARD_W * 0.5f)
+
+static void card_text_centre(const char *text, float y, int scale,
+                             uint32_t colour)
+{
+    int width = font_text_width(text, scale);
+
+    hud_text(text, CARD_CX - (float)width * 0.5f, y, scale, colour);
+}
+
+#define COL_HUD_CARD RGB(0x10, 0x14, 0x18)
+
+static void draw_result(const render_frame_args_t *args)
+{
+    const hiscore_result_t *result = args->result;
+    char text[40];
+    char number[12];
+    char seed[12];
+    Vtx *v;
+
+    if (!result || !args->score)
+        return;
+
+    hud_count = 0;
+    hud_rect(CARD_X, CARD_Y, CARD_W, CARD_H, COL_HUD_CARD);
+
+    card_text_centre("TIME UP", 56.0f, 3, COL_HUD_ACCENT);
+
+    format_seed(seed, result->entry.seed);
+    strcpy(text, "MAP ");
+    strcat(text, hiscore_map_name((int)result->entry.map));
+    strcat(text, "   SEED ");
+    strcat(text, seed);
+    card_text_centre(text, 78.0f, 1, COL_HUD_LABEL);
+
+    format_dm(number, (int)result->entry.distance_dm);
+    strcpy(text, "DIST ");
+    strcat(text, number);
+    strcat(text, " M");
+    card_text_centre(text, 92.0f, 2, COL_HUD_TEXT);
+
+    if (result->rank > 0) {
+        format_int(number, result->rank);
+        strcpy(text, "RANK ");
+        strcat(text, number);
+        strcat(text, " OF 10");
+    } else {
+        strcpy(text, "RANK --");
+    }
+    card_text_centre(text, 108.0f, 2, COL_HUD_TEXT);
+
+    if (result->rank == 1)
+        card_text_centre("NEW BEST", 124.0f, 2, COL_HUD_ACCENT);
+
+    card_text_centre("X RETRY   START MENU", 150.0f, 2, COL_HUD_TEXT);
+    card_text_centre(hiscore_result_status(result, args->hiscore_save_failed),
+                     176.0f, 1,
+                     args->hiscore_save_failed ? COL_HUD_WARN : COL_HUD_LABEL);
+
+    v = alloc_verts(hud_count);
+    if (!v)
+        return;
+    memcpy(v, hud_verts, (size_t)hud_count * sizeof(Vtx));
+    sceGuDrawArray(GU_SPRITES, V2D_FMT, hud_count, NULL, v);
 }
 
 /* ------------------------------------------------------------------ menu */
 
+/*
+ * Row layout (plan M7). A scale-2 glyph is 10 px tall (5 rows x 2), so the
+ * 16 px pitch is 10 px of glyph plus 6 px of leading: the 16 px highlight
+ * (y - 4 .. y + 12) fills the pitch and touches the neighbouring highlight but
+ * never the neighbouring text (the next row's glyph starts at y + 16). Ten
+ * rows put the last text at 200..210 and the footer at 214.
+ */
+#define MENU_ROW_Y0 56.0f
+#define MENU_ROW_PITCH 16.0f
+#define MENU_HIGHLIGHT_H 16.0f
+
 static const char *const menu_labels[MENU_ITEM_COUNT] = {
     "STEER MODE", "SENSITIVITY", "MINIMAP", "G-METER",
-    "STEER BAR", "CALIBRATE", "RESET PEAK G", "RESTART", "RESUME",
+    "STEER BAR", "CALIBRATE", "RESET PEAK G", "RESTART", "SIGN SIZE", "RESUME",
 };
 
 static void menu_value_string(const render_frame_args_t *args, int item,
@@ -1002,6 +1153,15 @@ static void menu_value_string(const render_frame_args_t *args, int item,
     case MENU_ITEM_STEER_BAR:
         strcpy(buf, s->steer_bar ? "ON" : "OFF");
         break;
+    case MENU_ITEM_SIGN_SIZE: {
+        size_t n;
+
+        format_int(buf, s->sign_scale_pct);
+        n = strlen(buf);
+        buf[n] = '%';
+        buf[n + 1] = '\0';
+        break;
+    }
     case MENU_ITEM_CALIBRATE:
     case MENU_ITEM_RESET_PEAK:
     case MENU_ITEM_RESTART:
@@ -1070,11 +1230,12 @@ static void draw_menu(const render_frame_args_t *args)
     } else {
         hud_text("SETTINGS", 209.0f, 36.0f, 2, COL_HUD_TEXT);
         for (i = 0; i < MENU_ITEM_COUNT; i++) {
-            float y = 56.0f + (float)i * 18.0f;
+            float y = MENU_ROW_Y0 + (float)i * MENU_ROW_PITCH;
             int value_width;
 
             if (i == menu->cursor)
-                hud_rect(96.0f, y - 4.0f, 288.0f, 18.0f, 0x30FFFFFFu);
+                hud_rect(96.0f, y - 4.0f, 288.0f, MENU_HIGHLIGHT_H,
+                         0x30FFFFFFu);
             hud_text(">", 98.0f, y, 2, COL_HUD_ACCENT);
             hud_text(menu_labels[i], 108.0f, y, 2, COL_HUD_TEXT);
             menu_value_string(args, i, text);
@@ -1170,10 +1331,11 @@ static void setup_3d(const car_state_t *car, float dt)
 
 static const char *const welcome_labels[WELCOME_ITEM_COUNT] = {
     "MAP", "START GAME", "ELEVATION", "HILL FREQ", "WIDTH FREQ", "ONE LANE",
+    "MODE",
 };
 
 static void welcome_value_string(int item, const road_config_t *terrain,
-                                 char *buf)
+                                 welcome_mode_t mode, char *buf)
 {
     float value = 0.0f;
 
@@ -1208,6 +1370,10 @@ static void welcome_value_string(int item, const road_config_t *terrain,
         format_fixed1(buf, terrain->one_lane_width);
         strcat(buf, "M");
         return;
+    case WELCOME_ITEM_MODE:
+        strcpy(buf, mode == WELCOME_MODE_FREE_DRIVE ? "FREE DRIVE"
+                                                    : "TIME ATTACK");
+        return;
     default:
         return;
     }
@@ -1239,8 +1405,109 @@ static float welcome_fraction(int item, const road_config_t *terrain)
     }
 }
 
+static void draw_welcome_tabs(welcome_page_t page)
+{
+    int race_w = font_text_width("RACE", 2);
+    int lb_w = font_text_width("LEADERBOARD", 2);
+    float race_x = 120.0f - (float)race_w * 0.5f;
+    float lb_x = 340.0f - (float)lb_w * 0.5f;
+    int race_on = page == WELCOME_PAGE_RACE;
+
+    hud_text("RACE", race_x, 48.0f, 2,
+             race_on ? COL_HUD_ACCENT : COL_HUD_LABEL);
+    hud_text("LEADERBOARD", lb_x, 48.0f, 2,
+             race_on ? COL_HUD_LABEL : COL_HUD_ACCENT);
+    if (race_on)
+        hud_rect(race_x, 62.0f, (float)race_w, 2.0f, COL_HUD_ACCENT);
+    else
+        hud_rect(lb_x, 62.0f, (float)lb_w, 2.0f, COL_HUD_ACCENT);
+}
+
+static void draw_leaderboard_page(const welcome_state_t *welcome,
+                                  const hiscore_book_t *hiscore,
+                                  bool hiscore_save_failed)
+{
+    static const char *const headers[HISCORE_COLUMN_COUNT] = {
+        "RK", "DIST", "SEED", "DATE"};
+    const hiscore_table_t *table = NULL;
+    char text[40];
+    char number[12];
+    char seed[12];
+    int map = welcome->lb_map;
+    int count = 0;
+    int first = welcome->lb_first;
+    int i;
+    float tab_x[ROAD_MAP_COUNT] = {196.0f, 236.0f, 272.0f};
+
+    if (hiscore && map >= 0 && map < ROAD_MAP_COUNT) {
+        table = &hiscore->table[map];
+        count = (int)table->count;
+    }
+
+    for (i = 0; i < ROAD_MAP_COUNT; i++)
+        hud_text(hiscore_map_name(i), tab_x[i], 72.0f, 1,
+                 i == map ? COL_HUD_ACCENT : COL_HUD_LABEL);
+
+    for (i = 0; i < HISCORE_COLUMN_COUNT; i++)
+        hud_text(headers[i], (float)hiscore_column_x(i), 88.0f, 1,
+                 COL_HUD_LABEL);
+
+    if (count == 0) {
+        hud_text("NO RUNS YET", 156.0f, 100.0f, 2, COL_HUD_LABEL);
+    } else {
+        for (i = 0; i < WELCOME_LB_VISIBLE; i++) {
+            int index = first + i;
+            const hiscore_entry_t *e;
+            float y = 100.0f + (float)i * 14.0f;
+
+            if (index >= count)
+                break;
+            e = &table->entry[index];
+            if (index == welcome->lb_cursor)
+                hud_rect(32.0f, y - 4.0f, 416.0f, 12.0f, 0x30FFFFFFu);
+            format_int(number, index + 1);
+            hud_text(number, (float)hiscore_column_x(HISCORE_COLUMN_RANK), y, 1,
+                     COL_HUD_ACCENT);
+            format_dm(number, (int)e->distance_dm);
+            strcpy(text, number);
+            strcat(text, "M");
+            hud_text(text, (float)hiscore_column_x(HISCORE_COLUMN_DIST), y, 1,
+                     COL_HUD_TEXT);
+            format_seed(seed, e->seed);
+            hud_text(seed, (float)hiscore_column_x(HISCORE_COLUMN_SEED), y, 1,
+                     COL_HUD_TEXT);
+            hiscore_format_date(number, e);
+            hud_text(number, (float)hiscore_column_x(HISCORE_COLUMN_DATE), y, 1,
+                     COL_HUD_LABEL);
+        }
+    }
+
+    if (table && count > 0 && welcome->lb_cursor < count) {
+        const hiscore_entry_t *e = &table->entry[welcome->lb_cursor];
+
+        format_metric(text, "EL", e->elevation_pct, "");
+        strcat(text, " HI ");
+        format_int(number, e->hill_pct);
+        strcat(text, number);
+        strcat(text, " WI ");
+        format_int(number, e->width_pct);
+        strcat(text, number);
+        strcat(text, " OL ");
+        format_dm(number, (int)e->one_lane_dm);
+        strcat(text, number);
+        strcat(text, "M");
+        hud_text(text, 150.0f, 210.0f, 1, COL_HUD_TEXT);
+    }
+
+    if (hiscore_save_failed)
+        hud_text("NOT SAVED", 150.0f, 222.0f, 1, COL_HUD_WARN);
+    hud_text("UP/DOWN ENTRY  LEFT/RIGHT MAP  L/R PAGE", 150.0f, 236.0f, 1,
+             COL_HUD_TEXT);
+}
+
 void render_welcome(const welcome_state_t *welcome,
-                    const road_config_t *terrain)
+                    const road_config_t *terrain,
+                    const hiscore_book_t *hiscore, bool hiscore_save_failed)
 {
     char text[24];
     int title_width = font_text_width("RACING 3D", 4);
@@ -1259,8 +1526,21 @@ void render_welcome(const welcome_state_t *welcome,
     hud_count = 0;
     hud_text("RACING 3D", (float)(SCREEN_W - title_width) * 0.5f, 20.0f, 4,
              COL_HUD_ACCENT);
-    hud_text("MAPS", (float)(SCREEN_W - font_text_width("MAPS", 2)) * 0.5f,
-             48.0f, 2, COL_HUD_LABEL);
+    draw_welcome_tabs(welcome->page);
+
+    if (welcome->page == WELCOME_PAGE_LEADERBOARD) {
+        draw_leaderboard_page(welcome, hiscore, hiscore_save_failed);
+        v = alloc_verts(hud_count);
+        if (v) {
+            memcpy(v, hud_verts, (size_t)hud_count * sizeof(Vtx));
+            sceGuDrawArray(GU_SPRITES, V2D_FMT, hud_count, NULL, v);
+        }
+        sceGuFinish();
+        sceGuSync(0, 0);
+        sceDisplayWaitVblankStart();
+        sceGuSwapBuffers();
+        return;
+    }
 
     for (i = 0; i < WELCOME_ITEM_COUNT; i++) {
         float y = 76.0f + (float)i * 24.0f;
@@ -1274,7 +1554,7 @@ void render_welcome(const welcome_state_t *welcome,
         hud_text(">", 40.0f, y, 2, COL_HUD_ACCENT);
         hud_text(welcome_labels[i], 56.0f, y, 2,
                  disabled ? COL_HUD_LABEL : COL_HUD_TEXT);
-        welcome_value_string(i, terrain, text);
+        welcome_value_string(i, terrain, welcome->mode, text);
         if (text[0]) {
             int width = font_text_width(text, 2);
 
@@ -1282,19 +1562,21 @@ void render_welcome(const welcome_state_t *welcome,
                      disabled ? COL_HUD_LABEL : COL_HUD_ACCENT);
         }
         if (i != WELCOME_ITEM_START && i != WELCOME_ITEM_MAP &&
-            !disabled) {
+            i != WELCOME_ITEM_MODE && !disabled) {
             hud_rect(196.0f, y + 3.0f, 250.0f, 8.0f, 0x80000000u);
             hud_rect(196.0f, y + 3.0f, 250.0f * fraction, 8.0f,
                      COL_HUD_ACCENT);
         }
     }
 
-    hud_text("UP/DOWN SELECT  LEFT/RIGHT ADJUST  X START",
-             (float)(SCREEN_W -
-                     font_text_width("UP/DOWN SELECT  LEFT/RIGHT ADJUST  X START",
-                                     1)) *
-                 0.5f,
-             244.0f, 1, COL_HUD_TEXT);
+    {
+        const char *footer =
+            "UP/DOWN SELECT  LEFT/RIGHT ADJUST  L/R PAGE  X START";
+
+        hud_text(footer,
+                 (float)(SCREEN_W - font_text_width(footer, 1)) * 0.5f,
+                 244.0f, 1, COL_HUD_TEXT);
+    }
 
     v = alloc_verts(hud_count);
     if (v) {
@@ -1409,15 +1691,29 @@ void render_frame(const render_frame_args_t *args, float dt)
     sceGuEnable(GU_TEXTURE_2D);
     draw_road(s0, s1);
     sceGuDisable(GU_TEXTURE_2D);
-    draw_lane_dashes(s0, s1);
+
+    /* Decal block: lane dashes, then the car shadow. Both are co-planar with
+     * the road (1.5 / 2 cm lifts a 16-bit depth buffer cannot resolve at
+     * distance), so the depth interaction is removed entirely - the 0.2.1
+     * ground/road fix applied to every co-planar pass. Both draws are callees
+     * that never touch the depth state, and it is restored unconditionally
+     * HERE, by their caller, after both have returned. */
+    sceGuDisable(GU_DEPTH_TEST);
+    sceGuDepthMask(GU_TRUE);
+    draw_lane_dashes(s0, car->s + ROAD_DASH_AHEAD);
+    draw_shadow(car->s, car_x, car_z, yaw);
+    sceGuDepthMask(GU_FALSE);
+    sceGuEnable(GU_DEPTH_TEST);
+
+    /* Signs BEFORE the guardrail and the marker posts: the beam top (0.75 m)
+     * and a post cap (1.20 m) both rise above the 0.70 m panel bottom, so each
+     * depth-tested pass must occlude a panel AND its depth-less ink (HIGH-2). */
+    signs_draw(car, args->settings);
 
     /* Roadside guardrail: draw hook owned by the guardrail task. */
     guardrail_draw(car, args->settings);
 
     draw_posts(car->s);
-    /* Roadside signs: draw hook owned by the roadsigns task. */
-    signs_draw(car, args->settings);
-    draw_shadow(car->s, car_x, car_z, yaw);
     draw_car(car, car_x, car_y, car_z, yaw);
 
     sceGuDisable(GU_DEPTH_TEST);
@@ -1425,6 +1721,14 @@ void render_frame(const render_frame_args_t *args, float dt)
     sceGuDisable(GU_TEXTURE_2D);
     draw_hud(args);
     draw_minimap(args);
+    /* Contact flash LAST: it is a 2D overlay and nothing may be drawn over it.
+     * Emitted inside guardrail_draw() it sat mid-3D-block, so draw_posts() - the
+     * marker posts drawn immediately after the rail - covered the 6 px column
+     * (924 px on four rail-probe frames, 772 on the frame at 49.3 s; the call
+     * placed either side of draw_posts() isolates it: 772 before, 924 after). */
+    guardrail_draw_flash(car);
+    if (!args->menu->open)
+        draw_result(args);
     if (args->menu->open)
         draw_menu(args);
 

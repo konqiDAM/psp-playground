@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "assets/roadsigns/signs.h"
+#include "physics.h"
 #include "road.h"
 
 static int failures;
@@ -151,14 +152,14 @@ static void test_crest_pair(void)
     g_seg_count = 1;
     g_seg[0].start_s = 172.28f;
     g_seg[0].grade_rate = -0.00923f;
-    n = signs_place(0.0f, 0.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(0.0f, 0.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(n == 2);
     CHECK(s[0].type == SIGNS_CREST && s[1].type == SIGNS_CREST);
     CHECK(NEAR(s[0].s, 52.28f, 0.01f)); /* 172.28 - 120, the segment start */
     CHECK(NEAR(s[1].s, 112.28f, 0.01f)); /* 172.28 - 60 */
-    CHECK(NEAR(s[0].lateral, 11.9f, 0.01f)); /* 9.5 + 2.4 */
+    CHECK(NEAR(s[0].lateral, 12.1f, 0.01f)); /* 9.5 + 0.8 + 1.8 */
     CHECK(NEAR(s[0].road_height, 1.3667f, 0.001f)); /* 52.28^2/2000 */
-    CHECK(signs_place(0.0f, 0.0f, 0.0f, s, 1) == 1); /* truncates */
+    CHECK(signs_place(0.0f, 0.0f, 0.0f, 1.0f, s, 1) == 1); /* truncates */
 }
 
 static void test_no_drift(void) /* sign positions are fixed while visible */
@@ -175,7 +176,7 @@ static void test_no_drift(void) /* sign positions are fixed while visible */
     g_seg[0].start_s = 172.28f;
     g_seg[0].grade_rate = -0.00923f;
     for (car = 0.0f; car <= 100.0f; car += 5.0f) {
-        int n = signs_place(car, 20.0f, 0.0f, a, SIGNS_MAX);
+        int n = signs_place(car, 20.0f, 0.0f, 1.0f, a, SIGNS_MAX);
         int i;
 
         for (i = 0; i < n; i++)
@@ -183,8 +184,8 @@ static void test_no_drift(void) /* sign positions are fixed while visible */
                   NEAR(a[i].s, 112.28f, 0.01f));
     }
     /* the same car_s reached forward or backward gives the same list */
-    n1 = signs_place(40.0f, 20.0f, 0.0f, a, SIGNS_MAX);
-    n2 = signs_place(40.0f, -20.0f, 0.0f, b, SIGNS_MAX);
+    n1 = signs_place(40.0f, 20.0f, 0.0f, 1.0f, a, SIGNS_MAX);
+    n2 = signs_place(40.0f, -20.0f, 0.0f, 1.0f, b, SIGNS_MAX);
     CHECK(n1 == n2 && memcmp(a, b, (size_t)n1 * sizeof(sign_t)) == 0);
 }
 
@@ -200,12 +201,12 @@ static void test_window_and_reverse(void)
     g_seg_count = 1;
     g_seg[0].start_s = 172.28f;
     g_seg[0].grade_rate = -0.00923f;
-    CHECK(signs_place(110.0f, 20.0f, 0.0f, s, SIGNS_MAX) == 0); /* 2.3 ahead */
-    CHECK(signs_place(100.0f, 20.0f, 0.0f, s, SIGNS_MAX) == 1); /* 12.3 ahead */
-    CHECK(signs_place(100.0f, -8.0f, 0.0f, s, SIGNS_MAX) == 1);
+    CHECK(signs_place(110.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX) == 0); /* 2.3 ahead */
+    CHECK(signs_place(100.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX) == 1); /* 12.3 ahead */
+    CHECK(signs_place(100.0f, -8.0f, 0.0f, 1.0f, s, SIGNS_MAX) == 1);
     CHECK(s[0].s > 100.0f); /* never behind */
     for (car = 0.0f; car <= 1000.0f; car += 7.0f) {
-        int n = signs_place(car, 20.0f, 0.0f, s, SIGNS_MAX);
+        int n = signs_place(car, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
         int i;
 
         for (i = 0; i < n; i++) {
@@ -230,7 +231,7 @@ static void test_dedupe(void)
     g_seg_count = 1;
     g_seg[0].start_s = 130.0f;
     g_seg[0].grade_rate = -0.00923f;
-    n = signs_place(0.0f, 20.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(0.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     /* candidates 10, 70 (crest) and 20, 80 (curve); 20 and 80 are 10 m from a
      * kept sign, so the overlapping pair collapses to one warning pair. */
     CHECK(n == 2);
@@ -252,11 +253,11 @@ static void test_curve_and_onelane(void)
     g.curve = true;
     g.curve_s = 300.0f;
     g.curve_k = 0.03f;
-    CHECK(signs_place(100.0f, 20.0f, 0.0f, s, SIGNS_MAX) == 2);
+    CHECK(signs_place(100.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX) == 2);
     CHECK(s[0].type == SIGNS_CURVE_RIGHT && NEAR(s[0].s, 180.0f, 0.01f));
     CHECK(NEAR(s[1].s, 240.0f, 0.01f));
     g.curve_k = -0.03f;
-    signs_place(100.0f, 20.0f, 0.0f, s, SIGNS_MAX);
+    signs_place(100.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(s[0].type == SIGNS_CURVE_LEFT);
 
     /* 5.0 -> 2.2 m over 30 m starting at 470: the ramp start is the width
@@ -269,7 +270,7 @@ static void test_curve_and_onelane(void)
     g.want_width_ramp = true;
     g.ramp_s = 470.0f;
     g.ramp_to = 2.2f;
-    n = signs_place(300.0f, 20.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(300.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(n == 2);
     CHECK(s[0].type == SIGNS_ONELANE && s[1].type == SIGNS_ONELANE);
     CHECK(NEAR(s[0].s, 350.0f, 0.01f));
@@ -277,8 +278,8 @@ static void test_curve_and_onelane(void)
 
     /* the same event seen from two car_s values emits the same positions AND
      * the same type: no face pop while the panel is on screen */
-    na = signs_place(300.0f, 20.0f, 0.0f, a, SIGNS_MAX);
-    nb = signs_place(360.0f, 20.0f, 0.0f, b, SIGNS_MAX);
+    na = signs_place(300.0f, 20.0f, 0.0f, 1.0f, a, SIGNS_MAX);
+    nb = signs_place(360.0f, 20.0f, 0.0f, 1.0f, b, SIGNS_MAX);
     CHECK(na >= 1 && nb >= 1);
     CHECK(a[0].type == b[0].type); /* ONELANE both times */
     for (i = 0; i < na; i++)
@@ -290,7 +291,7 @@ static void test_curve_and_onelane(void)
      * A two-lane road must never show a one-lane panel, even though 3.0 m is
      * exactly ROAD_NARROW_WARN_HALF. */
     g.ramp_to = 3.0f;
-    n = signs_place(300.0f, 20.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(300.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(n == 2);
     CHECK(s[0].type == SIGNS_MERGE && s[0].lanes == 2);
 }
@@ -313,7 +314,7 @@ static void test_three_events_bound(void)
     g.want_width_ramp = true;
     g.ramp_s = 300.0f;
     g.ramp_to = 8.0f;
-    n = signs_place(0.0f, 20.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(0.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(n > 0 && n <= SIGNS_MAX_DRAWN); /* 3 event kinds x 2 = 6 */
     for (i = 1; i < n; i++)
         CHECK(s[i].s > s[i - 1].s);
@@ -333,24 +334,25 @@ static void test_occlusion_cull(void)
     g_seg[0].grade_rate = -0.00923f;
     /* car 100, speed 0: eye_s = 91.8, eye_y = 3.1; the crest pair is at 230
      * and 290, both inside 8..240. */
-    CHECK(signs_place(100.0f, 0.0f, 0.0f, s, SIGNS_MAX) == 2);
-    /* A 1.6 m rise over 175..195 m blocks ONLY the bottom-edge line of the
-     * 230 m sign. Samples are at 101.8 + 10k, so the two inside the rise are
-     * s = 181.8 and 191.8: the near sign's bottom line to (230, 0.6) is
-     * 1.47 m / 1.29 m, its centre line to (230, 1.5) is 2.06 m / 1.94 m, and
-     * the 290 m sign's bottom line is 1.97 m / 1.84 m; threshold = 1.65 m.
-     * Bottom-edge culling must therefore drop the near sign only (margins
-     * 0.18 m and 0.19 m). */
+    CHECK(signs_place(100.0f, 0.0f, 0.0f, 1.0f, s, SIGNS_MAX) == 2);
+    /* A 1.6 m rise over 175..195 m blocks the ONE sight line that matters -
+     * the panel bottom, `road_height + SIGNS_PANEL_BOTTOM` = 0.70 m. Samples
+     * are at 101.8 + 10k, so the two inside the rise are s = 181.8 and 191.8:
+     * the near sign's bottom line to (230, 0.70) is 1.537 m / 1.363 m, the
+     * 290 m sign's is 2.010 m / 1.889 m; threshold = 1.6 + 0.05 = 1.65 m.
+     * The bottom line is the lowest line to the panel, so culling it drops the
+     * near sign only: it is 0.11 m / 0.29 m BELOW the threshold at those two
+     * samples, while the far sign stays 0.36 m / 0.24 m above it. */
     g.block = true;
     g.block_from = 175.0f;
     g.block_to = 195.0f;
     g.block_add = 1.6f;
-    n = signs_place(100.0f, 0.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(100.0f, 0.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(n == 1);
     CHECK(NEAR(s[0].s, 290.0f, 0.01f));
     /* a 100 m wall blocks every sight line -> nothing */
     g.block_add = 100.0f;
-    CHECK(signs_place(100.0f, 0.0f, 0.0f, s, SIGNS_MAX) == 0);
+    CHECK(signs_place(100.0f, 0.0f, 0.0f, 1.0f, s, SIGNS_MAX) == 0);
 }
 
 static void test_width_events(void)
@@ -367,21 +369,84 @@ static void test_width_events(void)
     /* car at 100: widening ramp 200 m ahead -> WIDEN, lanes 4, signs 180/240.
      * The scan is anchored on the fixed 2 m lattice, so the event is exactly
      * 300 and the panels exactly 180/240. */
-    n = signs_place(100.0f, 20.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(100.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(n == 2 && s[0].type == SIGNS_WIDEN && s[0].lanes == 4);
     CHECK(NEAR(s[0].s, 180.0f, 0.01f) && NEAR(s[1].s, 240.0f, 0.01f));
     /* odd car_s: a car_s-relative scan would sample 101.5, 103.5, ... and
      * find the ramp at 299.5 (panels 179.5/239.5); the fixed lattice must
      * still give 300 -> 180/240. */
-    n = signs_place(100.5f, 20.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(100.5f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(n == 2);
     CHECK(NEAR(s[0].s, 180.0f, 0.01f) && NEAR(s[1].s, 240.0f, 0.01f));
     g.ramp_s = 260.0f;
     g.ramp_to = 2.0f;
     /* a narrowing ramp at 260 -> event 260, t = w(290) = 2.0, lanes 1, so the
      * type is ONELANE (the same pure rule as the 470/2.2 case above). */
-    n = signs_place(100.0f, 20.0f, 0.0f, s, SIGNS_MAX);
+    n = signs_place(100.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX);
     CHECK(n >= 1 && s[0].type == SIGNS_ONELANE && s[0].lanes == 1);
+}
+
+/* --- B2: placement at the verge -------------------------------------- */
+
+static void test_panel_clears_car_and_posts(void)
+{
+    /* Goes through signs_place(), the real placement path: an arithmetic-only
+     * test would not be RED against a placement that still used 2.4 m. */
+    const float edge = 5.0f + ROAD_SHOULDER_WIDTH; /* 9.5 */
+    sign_t s[SIGNS_MAX];
+    float inner;
+
+    memset(&g, 0, sizeof g);
+    g.half_width = 5.0f;
+    g.want_width_ramp = true;
+    g.ramp_s = 300.0f;
+    g.ramp_to = 8.0f;
+    CHECK(signs_place(100.0f, 20.0f, 0.0f, 1.0f, s, SIGNS_MAX) == 2);
+    inner = s[0].lateral - SIGNS_PANEL_W * 0.5f; /* from the real placement */
+    CHECK(NEAR(inner, edge + 0.8f, 1e-4f));
+    /* marker-post envelope <= edge + 0.6 + 0.08*sqrt(2): 0.087 m clear */
+    CHECK(inner - (edge + 0.6f + 0.08f * 1.4142f) >= 0.05f);
+    /* car envelope edge - 0.4 + wheel face 1.04: 0.16 m clear */
+    CHECK(inner - (edge - CAR_EDGE_MARGIN + 1.04f) >= 0.10f);
+    /* the fixed panel bottom sits below the 1.38 m car roof */
+    CHECK(SIGNS_PANEL_BOTTOM < 1.38f);
+}
+
+static void test_place_scale_and_clamp(void)
+{
+    static const float scales[3] = {0.6f, 1.0f, 1.6f};
+    sign_t list[SIGNS_MAX];
+    sign_vec3_t q[4];
+    int k;
+
+    memset(&g, 0, sizeof g);
+    g.half_width = 5.0f;
+    g.want_width_ramp = true;
+    g.ramp_s = 300.0f;
+    g.ramp_to = 8.0f;
+
+    /* the inner edge never moves: lateral = edge + gap + W*s/2 */
+    for (k = 0; k < 3; k++) {
+        float scale = scales[k];
+
+        CHECK(signs_place(100.0f, 20.0f, 0.0f, scale, list, SIGNS_MAX) == 2);
+        CHECK(NEAR(list[0].lateral,
+                   9.5f + SIGNS_PANEL_GAP + 3.6f * scale * 0.5f, 1e-3f));
+        CHECK(NEAR(list[0].panel_scale, scale, 1e-6f));
+    }
+    /* out-of-range scales are clamped, not trusted */
+    CHECK(signs_place(100.0f, 20.0f, 0.0f, 99.0f, list, SIGNS_MAX) == 2);
+    CHECK(NEAR(list[0].panel_scale, SIGNS_SCALE_MAX, 1e-6f));
+    CHECK(signs_place(100.0f, 20.0f, 0.0f, 0.1f, list, SIGNS_MAX) == 2);
+    CHECK(NEAR(list[0].panel_scale, SIGNS_SCALE_MIN, 1e-6f));
+    CHECK(signs_place(100.0f, 20.0f, 0.0f, NAN, list, SIGNS_MAX) == 2);
+    CHECK(NEAR(list[0].panel_scale, SIGNS_SCALE_DEFAULT, 1e-6f));
+
+    /* the placed scale reaches the panel geometry */
+    CHECK(signs_place(100.0f, 20.0f, 0.0f, 1.6f, list, SIGNS_MAX) == 2);
+    CHECK(signs_panel_corners(&list[0], q));
+    CHECK(NEAR(fabsf(q[1].x - q[0].x), 3.6f * 1.6f, 1e-3f));
+    CHECK(NEAR(q[3].y, list[0].road_height + SIGNS_PANEL_BOTTOM, 1e-3f));
 }
 
 /* --- Task 2: panel frame and corners --------------------------------- */
@@ -393,10 +458,13 @@ static sign_t flat_sign(void)
     memset(&s, 0, sizeof s);
     s.type = SIGNS_CREST;
     s.s = 53.0f;
-    s.lateral = 11.9f;
+    s.lateral = 12.1f;
     s.road_height = 1.4045f;
     s.heading = 0.0f;
     s.grade = 0.0f;
+    /* flat_sign() memsets, so panel_scale would be 0 and the clamp would turn
+     * it into 0.60: every hand-built sign_t names its scale explicitly. */
+    s.panel_scale = 1.0f;
     return s;
 }
 
@@ -407,17 +475,17 @@ static void test_panel_corners_flat(void)
     int i;
 
     signs_panel_axes(&s, &c, &r, &u, &n);
-    CHECK(NEAR(c.x, -11.9f, 1e-4f));
-    CHECK(NEAR(c.y, 2.9045f, 1e-4f));
+    CHECK(NEAR(c.x, -12.1f, 1e-4f));
+    CHECK(NEAR(c.y, 3.4545f, 1e-4f)); /* 1.4045 + 0.70 + 2.7/2 */
     CHECK(NEAR(c.z, 53.0f, 1e-4f));
     CHECK(NEAR(r.x, -1.0f, 1e-4f));
     CHECK(NEAR(u.y, 1.0f, 1e-4f));
     CHECK(NEAR(n.z, -1.0f, 1e-4f)); /* faces the driver */
     CHECK(signs_panel_corners(&s, q));
-    CHECK(NEAR(q[0].x, -10.7f, 1e-4f) && NEAR(q[0].y, 3.8045f, 1e-4f));
-    CHECK(NEAR(q[1].x, -13.1f, 1e-4f) && NEAR(q[1].y, 3.8045f, 1e-4f));
-    CHECK(NEAR(q[2].x, -13.1f, 1e-4f) && NEAR(q[2].y, 2.0045f, 1e-4f));
-    CHECK(NEAR(q[3].x, -10.7f, 1e-4f) && NEAR(q[3].y, 2.0045f, 1e-4f));
+    CHECK(NEAR(q[0].x, -10.3f, 1e-4f) && NEAR(q[0].y, 4.8045f, 1e-4f));
+    CHECK(NEAR(q[1].x, -13.9f, 1e-4f) && NEAR(q[1].y, 4.8045f, 1e-4f));
+    CHECK(NEAR(q[2].x, -13.9f, 1e-4f) && NEAR(q[2].y, 2.1045f, 1e-4f));
+    CHECK(NEAR(q[3].x, -10.3f, 1e-4f) && NEAR(q[3].y, 2.1045f, 1e-4f));
     for (i = 0; i < 4; i++)
         CHECK(NEAR(q[i].z, 53.0f, 1e-4f));
 }
@@ -435,23 +503,96 @@ static void test_panel_follows_grade(void)
     CHECK(NEAR(n.y, -0.11912f, 1e-3f));
     CHECK(NEAR(n.z, -0.99288f, 1e-3f));
     CHECK(signs_panel_corners(&s, q));
-    CHECK(NEAR(q[0].y - q[3].y, 1.7872f, 1e-3f));
-    CHECK(NEAR(q[0].z - q[3].z, -0.2144f, 1e-3f));
+    CHECK(NEAR(q[0].y - q[3].y, 2.6808f, 1e-3f)); /* 2.7 * cos 6.83 deg */
+    CHECK(NEAR(q[0].z - q[3].z, -0.3216f, 1e-3f));
+}
+
+/*
+ * widest_symbol_extent - the fixture's world-x span of every symbol quad.
+ * flat_sign() has heading 0 and grade 0, so the panel's right vector is
+ * (-1,0,0) and the x extent is exactly 2*hu*(u_max - u_min).
+ */
+static float widest_symbol_extent(const sign_t *s)
+{
+    sign_quad_t q[8];
+    int n = signs_symbol_quads(s, q, 8);
+    float lo = 1e9f;
+    float hi = -1e9f;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        const sign_vec3_t *pts[4];
+        int k;
+
+        pts[0] = &q[i].a;
+        pts[1] = &q[i].b;
+        pts[2] = &q[i].c;
+        pts[3] = &q[i].d;
+        for (k = 0; k < 4; k++) {
+            if (pts[k]->x < lo)
+                lo = pts[k]->x;
+            if (pts[k]->x > hi)
+                hi = pts[k]->x;
+        }
+    }
+    return n > 0 ? hi - lo : 0.0f;
+}
+
+static void test_panel_scales_with_symbols(void)
+{
+    static const float scales[3] = {0.6f, 1.0f, 1.6f};
+    sign_t s = flat_sign();
+    sign_panel_t f;
+    sign_vec3_t q[4];
+    float wide100;
+    int k;
+
+    /* 1.5x panel: 3.6 x 2.7 with a fixed 0.70 m bottom */
+    CHECK(signs_panel_corners(&s, q));
+    CHECK(NEAR(q[0].y - q[3].y, 2.7f, 1e-3f));
+    /* the fixture's right vector is (-1,0,0), so the SIGNED span is -3.6 m;
+     * the panel width is the magnitude (plan's 3.6f assumes r.x = +1). */
+    CHECK(NEAR(fabsf(q[1].x - q[0].x), 3.6f, 1e-3f));
+    CHECK(NEAR(q[3].y, s.road_height + 0.70f, 1e-3f));
+    signs_panel_frame(&s, &f);
+    CHECK(NEAR(f.hu, 1.8f, 1e-4f));
+    CHECK(NEAR(f.hv, 1.35f, 1e-4f));
+
+    /* the symbols are 1.5x the 0.6.0 ones (1.43 m) and linear in the scale */
+    wide100 = widest_symbol_extent(&s);
+    CHECK(wide100 >= 2.0f);
+    s.panel_scale = 1.6f;
+    CHECK(NEAR(widest_symbol_extent(&s), 1.6f * wide100, 0.01f));
+    s.panel_scale = 0.6f;
+    CHECK(NEAR(widest_symbol_extent(&s), 0.6f * wide100, 0.01f));
+
+    /* one source of truth: corners and symbols share the frame, and the
+     * symbols never overhang the panel at any scale */
+    for (k = 0; k < 3; k++) {
+        s.panel_scale = scales[k];
+        CHECK(signs_panel_corners(&s, q));
+        CHECK(NEAR(q[3].y, s.road_height + 0.70f, 1e-3f)); /* fixed bottom */
+        CHECK(NEAR(q[0].y - q[3].y, 2.7f * scales[k], 1e-3f));
+        CHECK(NEAR(fabsf(q[1].x - q[0].x), 3.6f * scales[k], 1e-3f));
+        signs_panel_frame(&s, &f);
+        CHECK(NEAR(fabsf(q[1].x - q[0].x), 2.0f * f.hu, 1e-4f));
+        CHECK(widest_symbol_extent(&s) <= 2.0f * f.hu + 1e-4f);
+    }
 }
 
 /* --- Task 3: symbol geometry ----------------------------------------- */
 
 static void local(const sign_t *s, sign_vec3_t p, float *u, float *v)
 {
-    sign_vec3_t c, r, up, n;
+    sign_panel_t f;
     float dx, dy, dz;
 
-    signs_panel_axes(s, &c, &r, &up, &n);
-    dx = p.x - c.x;
-    dy = p.y - c.y;
-    dz = p.z - c.z;
-    *u = (dx * r.x + dy * r.y + dz * r.z) / 1.2f;
-    *v = (dx * up.x + dy * up.y + dz * up.z) / 0.9f;
+    signs_panel_frame(s, &f);
+    dx = p.x - f.centre.x;
+    dy = p.y - f.centre.y;
+    dz = p.z - f.centre.z;
+    *u = (dx * f.right.x + dy * f.right.y + dz * f.right.z) / f.hu;
+    *v = (dx * f.up.x + dy * f.up.y + dz * f.up.z) / f.hv;
 }
 
 static float quad_extreme_u(const sign_t *s, const sign_quad_t *q, int n,
@@ -553,6 +694,24 @@ static void test_symbols(void)
     CHECK(signs_symbol_quads(&s, q, 1) == 0);
 }
 
+/* --- C1: the base/ink vertex split ----------------------------------- */
+
+static void test_base_ink_vertex_split(void)
+{
+    /* One allocation, two draw ranges: [0, n_base) depth-tested, then
+     * [n_base, n_all) as a depth-less decal. */
+    CHECK(signs_panel_verts() == 6);
+    CHECK(signs_post_verts() == 24);
+    CHECK(signs_base_verts() == 30);
+    CHECK(signs_ink_verts(0) == 0);
+    CHECK(signs_ink_verts(2) == 12);
+    CHECK(signs_ink_verts(3) == 18);
+    CHECK(signs_ink_verts(6) == 36);
+    /* the widest sign (6 symbol quads) still fits one SIGNS_MAX_VERTS block */
+    CHECK(signs_base_verts() + signs_ink_verts(6) <= SIGNS_MAX_VERTS);
+    CHECK(signs_base_verts() + signs_ink_verts(6) == 66);
+}
+
 static void test_bad_inputs(void)
 {
     sign_t s = flat_sign();
@@ -573,8 +732,8 @@ static void test_bad_inputs(void)
     CHECK(signs_symbol_quads(&s, quads, 0) == 0);
     CHECK(signs_symbol_quads(&s, quads, -1) == 0);
     CHECK(signs_symbol_quads(NULL, quads, 8) == 0);
-    CHECK(signs_place(0.0f, 0.0f, 0.0f, list, 0) == 0);
-    CHECK(signs_place(0.0f, 0.0f, 0.0f, NULL, SIGNS_MAX) == 0);
+    CHECK(signs_place(0.0f, 0.0f, 0.0f, 1.0f, list, 0) == 0);
+    CHECK(signs_place(0.0f, 0.0f, 0.0f, 1.0f, NULL, SIGNS_MAX) == 0);
 }
 
 int main(void)
@@ -587,9 +746,13 @@ int main(void)
     test_occlusion_cull();
     test_width_events();
     test_three_events_bound();
+    test_panel_clears_car_and_posts();
+    test_place_scale_and_clamp();
     test_panel_corners_flat();
     test_panel_follows_grade();
+    test_panel_scales_with_symbols();
     test_symbols();
+    test_base_ink_vertex_split();
     test_bad_inputs();
     return failures ? 1 : 0;
 }

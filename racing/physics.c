@@ -45,6 +45,7 @@ void car_reset(car_state_t *car)
     car->rail_hold = 0.0f;
     car->rail_side = 0;
     car->rail_contact = false;
+    car->ds = 0.0f;
 }
 
 float car_kmh(const car_state_t *car)
@@ -201,6 +202,7 @@ void car_step(car_state_t *car, const car_input_t *input, float dt,
     car->slip = clampf(car->slip, -CAR_MAX_SLIP, CAR_MAX_SLIP);
 
     car->s += ds;
+    car->ds = ds;
     {
         float limit_left = road_rail_limit(road, -1);
         float limit_right = road_rail_limit(road, 1);

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "hiscore.h"
 #include "input.h"
 #include "menu.h"
 #include "minimap.h"
@@ -42,6 +43,20 @@ static void put_crc(uint8_t *buf)
     buf[11] = (uint8_t)((crc >> 8) & 0xFFu);
 }
 
+/* A hand-built v1 file: version 1, byte 9 reserved (0) or deliberately set. */
+static void build_v1(uint8_t *buf, uint8_t byte9)
+{
+    memset(buf, 0, RACING_SETTINGS_FILE_SIZE);
+    memcpy(buf, "R3DS", 4);
+    buf[4] = 1;
+    buf[5] = 0x07u;
+    buf[6] = 110;
+    buf[7] = 32;
+    buf[8] = 128;
+    buf[9] = byte9;
+    put_crc(buf);
+}
+
 static void test_settings_defaults(void)
 {
     racing_settings_t s;
@@ -54,6 +69,19 @@ static void test_settings_defaults(void)
     CHECK(s.steer_bar);
     CHECK(s.analog_centre == RACING_SETTINGS_CENTRE_DEFAULT);
     CHECK(s.analog_deadzone == RACING_SETTINGS_DEADZONE_DEFAULT);
+}
+
+/* G1: RACING.CFG v2 carries the sign scale in the old reserved byte 9. */
+static void test_settings_defaults_v2(void)
+{
+    racing_settings_t s;
+
+    settings_defaults(&s);
+    CHECK(RACING_SETTINGS_VERSION == 2);
+    CHECK(RACING_SETTINGS_SIGN_SCALE_MIN == 60);
+    CHECK(RACING_SETTINGS_SIGN_SCALE_MAX == 160);
+    CHECK(RACING_SETTINGS_SIGN_SCALE_DEFAULT == 100);
+    CHECK(s.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_DEFAULT);
 }
 
 static void test_settings_crc16_vector(void)
@@ -75,6 +103,7 @@ static void test_settings_round_trip(void)
     a.steer_bar = true;
     a.analog_centre = 143;
     a.analog_deadzone = 48;
+    a.sign_scale_pct = 130;
 
     CHECK(settings_serialize(&a, buf, (int)sizeof(buf)) ==
           RACING_SETTINGS_FILE_SIZE);
@@ -86,6 +115,7 @@ static void test_settings_round_trip(void)
     CHECK(b.steer_bar);
     CHECK(b.analog_centre == 143);
     CHECK(b.analog_deadzone == 48);
+    CHECK(b.sign_scale_pct == 130);
 }
 
 static void test_settings_rejects_corruption(void)
@@ -108,16 +138,116 @@ static void test_settings_rejects_corruption(void)
             bad[i] = (uint8_t)(bad[i] ^ (1u << bit));
             settings_defaults(&b);
             b.sensitivity = 1.4f; /* prove the failure resets it */
+            b.sign_scale_pct = 160;
             CHECK(!settings_deserialize(&b, bad, (int)sizeof(bad)));
             CHECK(b.steer_mode == RACING_STEER_DPAD);
             CHECK(nearly(b.sensitivity, 1.0f, 1e-6f));
             CHECK(b.minimap && b.gmeter && b.steer_bar);
             CHECK(b.analog_centre == RACING_SETTINGS_CENTRE_DEFAULT);
             CHECK(b.analog_deadzone == RACING_SETTINGS_DEADZONE_DEFAULT);
+            CHECK(b.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_DEFAULT);
         }
     }
 
     CHECK(settings_serialize(&a, valid, RACING_SETTINGS_FILE_SIZE - 1) == -1);
+}
+
+/* G1: version 2 writes the sign scale into byte 9, CRC over bytes 0..9. */
+static void test_settings_v2_round_trip(void)
+{
+    racing_settings_t a;
+    racing_settings_t b;
+    uint8_t buf[RACING_SETTINGS_FILE_SIZE];
+    int i;
+
+    settings_defaults(&a);
+    a.sign_scale_pct = 160;
+    CHECK(settings_serialize(&a, buf, (int)sizeof(buf)) ==
+          RACING_SETTINGS_FILE_SIZE);
+    CHECK(buf[4] == 2);
+    CHECK(buf[9] == 160);
+    for (i = 12; i < RACING_SETTINGS_FILE_SIZE; i++)
+        CHECK(buf[i] == 0);
+    CHECK(settings_deserialize(&b, buf, (int)sizeof(buf)));
+    CHECK(b.sign_scale_pct == 160);
+
+    /* byte 9 is inside the CRC: the stored value must match bytes 0..9. */
+    CHECK((buf[10] | (buf[11] << 8)) == settings_crc16(buf, 10));
+}
+
+/* G1: a v1 file still loads; its reserved byte 9 must be 0. */
+static void test_settings_v1_still_loads(void)
+{
+    racing_settings_t b;
+    uint8_t buf[RACING_SETTINGS_FILE_SIZE];
+
+    build_v1(buf, 0);
+    CHECK(settings_deserialize(&b, buf, (int)sizeof(buf)));
+    CHECK(b.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_DEFAULT);
+    CHECK(nearly(b.sensitivity, 1.1f, 1e-6f));
+
+    /* A v1 file with the reserved byte set is not a v1 file. */
+    build_v1(buf, 40);
+    settings_defaults(&b);
+    b.sign_scale_pct = 160;
+    CHECK(!settings_deserialize(&b, buf, (int)sizeof(buf)));
+    CHECK(b.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_DEFAULT);
+}
+
+/* G1: v2 rejects an out-of-range scale and an unknown version. */
+static void test_settings_v2_rejects_bad_scale(void)
+{
+    racing_settings_t a;
+    racing_settings_t b;
+    uint8_t buf[RACING_SETTINGS_FILE_SIZE];
+
+    settings_defaults(&a);
+    CHECK(settings_serialize(&a, buf, (int)sizeof(buf)) ==
+          RACING_SETTINGS_FILE_SIZE);
+
+    buf[9] = 59;
+    put_crc(buf);
+    settings_defaults(&b);
+    b.sign_scale_pct = 160;
+    CHECK(!settings_deserialize(&b, buf, (int)sizeof(buf)));
+    CHECK(b.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_DEFAULT);
+
+    buf[9] = 161;
+    put_crc(buf);
+    b.sign_scale_pct = 160;
+    CHECK(!settings_deserialize(&b, buf, (int)sizeof(buf)));
+    CHECK(b.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_DEFAULT);
+
+    buf[9] = 100;
+    buf[4] = 3;
+    put_crc(buf);
+    b.sign_scale_pct = 160;
+    CHECK(!settings_deserialize(&b, buf, (int)sizeof(buf)));
+    CHECK(b.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_DEFAULT);
+}
+
+/* G1: serialize clamps byte 9, so the game can never write a file its own
+ * deserializer rejects (a validate-only clamp is not enough). */
+static void test_settings_serialize_clamps_sign_scale(void)
+{
+    racing_settings_t a;
+    racing_settings_t b;
+    uint8_t buf[RACING_SETTINGS_FILE_SIZE];
+
+    settings_defaults(&a);
+    a.sign_scale_pct = 999;
+    CHECK(settings_serialize(&a, buf, (int)sizeof(buf)) ==
+          RACING_SETTINGS_FILE_SIZE);
+    CHECK(buf[9] == RACING_SETTINGS_SIGN_SCALE_MAX);
+    CHECK(settings_deserialize(&b, buf, (int)sizeof(buf)));
+    CHECK(b.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_MAX);
+
+    a.sign_scale_pct = 0;
+    CHECK(settings_serialize(&a, buf, (int)sizeof(buf)) ==
+          RACING_SETTINGS_FILE_SIZE);
+    CHECK(buf[9] == RACING_SETTINGS_SIGN_SCALE_MIN);
+    CHECK(settings_deserialize(&b, buf, (int)sizeof(buf)));
+    CHECK(b.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_MIN);
 }
 
 static void test_settings_rejects_unknown_flags(void)
@@ -184,33 +314,54 @@ static void test_settings_validate_clamps(void)
     CHECK(s.steer_mode == RACING_STEER_DPAD);
 
     settings_defaults(&s);
+    s.sign_scale_pct = 50;
+    CHECK(settings_validate(&s));
+    CHECK(s.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_MIN);
+
+    settings_defaults(&s);
+    s.sign_scale_pct = 200;
+    CHECK(settings_validate(&s));
+    CHECK(s.sign_scale_pct == RACING_SETTINGS_SIGN_SCALE_MAX);
+
+    settings_defaults(&s);
     CHECK(!settings_validate(&s));
 }
 
-static void test_settings_file_is_unchanged(void)
+static void test_settings_file_is_v2_and_16_bytes(void)
 {
     racing_settings_t s;
     uint8_t buf[32];
 
     settings_defaults(&s);
     CHECK(RACING_SETTINGS_FILE_SIZE == 16);
-    CHECK(RACING_SETTINGS_VERSION == 1);
+    CHECK(RACING_SETTINGS_VERSION == 2);
     CHECK(settings_serialize(&s, buf, (int)sizeof(buf)) == 16);
-    CHECK(buf[4] == 1);
+    CHECK(buf[4] == 2);
+}
+
+static welcome_action_t welcome_press_book(welcome_state_t *w,
+                                           road_config_t *c,
+                                           const hiscore_book_t *book,
+                                           menu_input_t in)
+{
+    return welcome_update(w, c, book, &in);
 }
 
 static welcome_action_t welcome_press(welcome_state_t *w, road_config_t *c,
                                       menu_input_t in)
 {
-    return welcome_update(w, c, &in);
+    hiscore_book_t book;
+
+    hiscore_clear(&book);
+    return welcome_press_book(w, c, &book, in);
 }
 
 static void test_welcome_defaults_and_navigation(void)
 {
     welcome_state_t w;
     road_config_t c;
-    menu_input_t down = {false, true, false, false, false, false, false, false};
-    menu_input_t up = {true, false, false, false, false, false, false, false};
+    menu_input_t down = {false, true, false, false, false, false, false, false, false, false};
+    menu_input_t up = {true, false, false, false, false, false, false, false, false, false};
 
     welcome_reset(&w, &c);
     CHECK(w.cursor == WELCOME_ITEM_START);
@@ -233,9 +384,9 @@ static void test_welcome_sliders_adjust(void)
 {
     welcome_state_t w;
     road_config_t c;
-    menu_input_t down = {false, true, false, false, false, false, false, false};
-    menu_input_t right = {false, false, false, true, false, false, false, false};
-    menu_input_t left = {false, false, true, false, false, false, false, false};
+    menu_input_t down = {false, true, false, false, false, false, false, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
+    menu_input_t left = {false, false, true, false, false, false, false, false, false, false};
 
     welcome_reset(&w, &c);
     welcome_press(&w, &c, down);
@@ -259,8 +410,8 @@ static void test_welcome_start_action(void)
 {
     welcome_state_t w;
     road_config_t c;
-    menu_input_t accept = {false, false, false, false, true, false, false, false};
-    menu_input_t down = {false, true, false, false, false, false, false, false};
+    menu_input_t accept = {false, false, false, false, true, false, false, false, false, false};
+    menu_input_t down = {false, true, false, false, false, false, false, false, false, false};
 
     welcome_reset(&w, &c);
     CHECK(welcome_press(&w, &c, accept) == WELCOME_ACTION_START);
@@ -274,8 +425,8 @@ static void test_welcome_sliders_keep_values_on_restart(void)
 {
     welcome_state_t w;
     road_config_t c;
-    menu_input_t down = {false, true, false, false, false, false, false, false};
-    menu_input_t right = {false, false, false, true, false, false, false, false};
+    menu_input_t down = {false, true, false, false, false, false, false, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
 
     welcome_reset(&w, &c);
     welcome_press(&w, &c, down);
@@ -296,9 +447,9 @@ static void test_welcome_map_row(void)
 {
     welcome_state_t w;
     road_config_t c;
-    menu_input_t up = {true, false, false, false, false, false, false, false};
-    menu_input_t right = {false, false, false, true, false, false, false, false};
-    menu_input_t left = {false, false, true, false, false, false, false, false};
+    menu_input_t up = {true, false, false, false, false, false, false, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
+    menu_input_t left = {false, false, true, false, false, false, false, false, false, false};
 
     welcome_reset(&w, &c);
     CHECK(w.cursor == WELCOME_ITEM_START);
@@ -320,8 +471,8 @@ static void test_welcome_map_restart(void)
 {
     welcome_state_t w;
     road_config_t c;
-    menu_input_t up = {true, false, false, false, false, false, false, false};
-    menu_input_t right = {false, false, false, true, false, false, false, false};
+    menu_input_t up = {true, false, false, false, false, false, false, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
 
     welcome_reset(&w, &c);
     welcome_press(&w, &c, up);
@@ -338,7 +489,7 @@ static void test_welcome_highway_disabled_sliders(void)
 {
     welcome_state_t w;
     road_config_t c;
-    menu_input_t right = {false, false, false, true, false, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
 
     welcome_reset(&w, &c);
     c.map = ROAD_MAP_HIGHWAY;
@@ -359,7 +510,7 @@ static void test_welcome_uphill_width_slider(void)
 {
     welcome_state_t w;
     road_config_t c;
-    menu_input_t right = {false, false, false, true, false, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
 
     welcome_reset(&w, &c);
     c.map = ROAD_MAP_UPHILL;
@@ -767,11 +918,14 @@ static void test_minimap_projection(void)
     road_reset(ROAD_SEED);
     car.s = 50.0f;
     car.lateral = 0.0f;
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &map);
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, 360.0f, 118.0f,
+                  472.0f, 224.0f, &map);
     p0 = road_sample(car.s - MINIMAP_BEHIND);
 
     CHECK(map.count == MINIMAP_SAMPLES);
     CHECK(nearly(map.car_x, 416.0f, 1e-4f));
+    /* the panel rect (360..472) and the map rect (366..466) share a centre */
+    CHECK(nearly(map.panel_cx, 416.0f, 1e-4f));
     CHECK(nearly(map.car_y, 210.0f, 1e-4f));
     CHECK(map.left_y[0] > map.car_y);
     CHECK(map.left_y[MINIMAP_SAMPLES - 1] < map.car_y);
@@ -779,13 +933,15 @@ static void test_minimap_projection(void)
     CHECK(map.right_x[0] > map.car_x);
 
     width = map.right_x[0] - map.left_x[0];
-    CHECK(nearly(width, 2.0f * p0.edge_half_width * 50.0f / 12.0f, 0.5f));
+    CHECK(nearly(width, 2.0f * p0.edge_half_width * 50.0f / MINIMAP_LATERAL,
+                 0.5f));
 
+    /* M-9: the clamp is the PANEL rect (360,118,472,224), not map +- 8. */
     for (i = 0; i < map.count; i++) {
-        CHECK(map.left_x[i] >= 358.0f && map.left_x[i] <= 474.0f);
-        CHECK(map.left_y[i] >= 124.0f && map.left_y[i] <= 226.0f);
-        CHECK(map.right_x[i] >= 358.0f && map.right_x[i] <= 474.0f);
-        CHECK(map.right_y[i] >= 124.0f && map.right_y[i] <= 226.0f);
+        CHECK(map.left_x[i] >= 360.0f && map.left_x[i] <= 472.0f);
+        CHECK(map.left_y[i] >= 118.0f && map.left_y[i] <= 224.0f);
+        CHECK(map.right_x[i] >= 360.0f && map.right_x[i] <= 472.0f);
+        CHECK(map.right_y[i] >= 118.0f && map.right_y[i] <= 224.0f);
     }
 }
 
@@ -800,106 +956,160 @@ static void test_minimap_lateral_shift(void)
     road_reset(ROAD_SEED);
     car.s = 50.0f;
     car.lateral = 0.0f;
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &centred);
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, 360.0f, 118.0f,
+                  472.0f, 224.0f, &centred);
 
     car.lateral = 3.0f;
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &shifted);
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, 360.0f, 118.0f,
+                  472.0f, 224.0f, &shifted);
 
     centre_0 = (centred.left_x[0] + centred.right_x[0]) * 0.5f;
     centre_3 = (shifted.left_x[0] + shifted.right_x[0]) * 0.5f;
-    CHECK(nearly(centre_3 - centre_0, -3.0f * 50.0f / 12.0f, 1.0f));
+    /* 3 m = 0.9375 px at sx = 50/160; the old 1.0 px tolerance would pass a
+     * map that did not shift at all. */
+    CHECK(nearly(centre_3 - centre_0, -3.0f * 50.0f / MINIMAP_LATERAL, 1e-3f));
 }
 
-static void test_minimap_outline_counts(void)
+static void test_minimap_ribbon_counts(void)
 {
+    CHECK(MINIMAP_AHEAD == 250.0f);
     CHECK(MINIMAP_SAMPLES == 24);
-    CHECK(MINIMAP_CONTOUR_POINTS == 48);
-    CHECK(MINIMAP_OUTLINE_SEGMENTS == 48);
-    CHECK(MINIMAP_OUTLINE_VERTS == 288);
-    /* 288 outline + 3 marker + 3 chevron must fit MAX_MAP_VERTS (512). */
-    CHECK(MINIMAP_OUTLINE_VERTS + 6 == 294);
-    CHECK(MINIMAP_OUTLINE_VERTS + 6 <= 512);
+    CHECK(MINIMAP_VERTS == 48);
+    CHECK(MINIMAP_WARN_AHEAD == 120.0f);
+    CHECK(MINIMAP_MARKER_VERTS == 3); /* A1 owns all three macros */
+    CHECK(MINIMAP_CHEVRON_VERTS == 3);
+    CHECK(MINIMAP_VERTS + MINIMAP_MARKER_VERTS + MINIMAP_CHEVRON_VERTS == 54);
+    CHECK(MINIMAP_VERTS + 6 <= 64);
 }
 
-static void test_minimap_outline_closed(void)
+static void test_minimap_widths_at_the_new_scale(void)
+{
+    /* H-4: the new MINIMAP_LATERAL breaks two existing pins. With sx = 0.3125
+     * the 2-lane ribbon is 5.9375 px and the 4-lane one 7.8125 px (the old
+     * values were 79.1667 / 104.1667 at 50/12). */
+    CHECK(nearly(2.0f * 9.5f * 50.0f / MINIMAP_LATERAL, 5.9375f, 1e-4f));
+    CHECK(nearly(2.0f * 12.5f * 50.0f / MINIMAP_LATERAL, 7.8125f, 1e-4f));
+}
+
+static void test_minimap_isotropic(void)
+{
+    /* sx and sy must agree within 1 % or the map is not a map */
+    CHECK(nearly(50.0f / MINIMAP_LATERAL, 78.0f / MINIMAP_AHEAD, 0.002f));
+}
+
+static void test_minimap_min_width_documented_poses(void)
+{
+    static const road_map_t maps[] = {ROAD_MAP_DEFAULT, ROAD_MAP_UPHILL,
+                                      ROAD_MAP_HIGHWAY};
+    static const float poses[] = {20.0f, 60.0f, 120.0f};
+    car_state_t car = {0};
+    minimap_strip_t strip;
+    road_config_t cfg;
+    int m, k, i;
+
+    /* measured: DEFAULT 4.70, HIGHWAY 6.19, UPHILL 2.55 px at these poses, so
+     * the 1.5 px floor is inert here and this asserts the raw projection */
+    for (m = 0; m < 3; m++) {
+        for (k = 0; k < 3; k++) {
+            road_config_defaults(&cfg);
+            cfg.map = maps[m];
+            road_reset_config(ROAD_SEED, &cfg);
+            car.s = poses[k];
+            minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f,
+                          360.0f, 118.0f, 472.0f, 224.0f, &strip);
+            for (i = 0; i < MINIMAP_SAMPLES; i++) {
+                CHECK(fabsf(strip.right_x[i] - strip.left_x[i]) >= 2.0f);
+                CHECK(strip.left_x[i] >= 360.0f && strip.left_x[i] <= 472.0f);
+                CHECK(strip.left_y[i] >= 118.0f && strip.left_y[i] <= 224.0f);
+            }
+        }
+    }
+}
+
+static void test_minimap_min_width_u_turn(void)
+{
+    /* M-8: the WORST measured pose is UPHILL 170 (0.000 px with the shipped
+     * panel clamp; 0.065 px unclamped, 16 of 24 samples below 1.5 px). 200 is
+     * 0.000 px too (0.565 unclamped) but is where the edges swap (14 pairs).
+     * Test both: the floor at 170, the orientation at 200. */
+    static const float poses[] = {170.0f, 200.0f};
+    car_state_t car = {0};
+    minimap_strip_t strip;
+    minimap_point_t v[MINIMAP_VERTS];
+    road_config_t cfg;
+    int k, i;
+    int swapped_at_200 = 0;
+
+    road_config_defaults(&cfg);
+    cfg.map = ROAD_MAP_UPHILL;
+    for (k = 0; k < 2; k++) {
+        road_reset_config(ROAD_SEED, &cfg);
+        car.s = poses[k];
+        minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f,
+                      360.0f, 118.0f, 472.0f, 224.0f, &strip);
+        CHECK(minimap_ribbon(&strip, v) == MINIMAP_VERTS);
+        for (i = 0; i + 1 < MINIMAP_VERTS; i += 2) {
+            CHECK(fabsf(v[i + 1].x - v[i].x) >= MINIMAP_MIN_WIDTH - 1e-4f);
+            /* the inward expansion never leaves the panel rect (M-9) */
+            CHECK(v[i].x >= 360.0f && v[i].x <= 472.0f);
+            CHECK(v[i + 1].x >= 360.0f && v[i + 1].x <= 472.0f);
+            if (poses[k] == 200.0f && v[i].x > v[i + 1].x)
+                swapped_at_200++;
+        }
+    }
+    CHECK(swapped_at_200 >= 1); /* orientation kept on the doubling-back road */
+}
+
+static void test_minimap_ribbon_order(void)
 {
     car_state_t car = {0};
-    minimap_strip_t map;
-    minimap_point_t pts[MINIMAP_CONTOUR_POINTS];
+    minimap_strip_t strip;
+    minimap_point_t v[MINIMAP_VERTS];
     int i;
 
+    /* a documented pose (DEFAULT, s = 50) where the 1.5 px floor is inert, so
+     * the strip is the raw projection and can be compared with left_x/right_x */
     road_reset(ROAD_SEED);
     car.s = 50.0f;
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &map);
-    minimap_contour(&map, pts);
-
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, 360.0f, 118.0f,
+                  472.0f, 224.0f, &strip);
+    CHECK(minimap_ribbon(&strip, v) == MINIMAP_VERTS);
     for (i = 0; i < MINIMAP_SAMPLES; i++) {
-        CHECK(nearly(pts[i].x, map.left_x[i], 1e-4f));
-        CHECK(nearly(pts[i].y, map.left_y[i], 1e-4f));
-        CHECK(nearly(pts[MINIMAP_SAMPLES + i].x,
-                     map.right_x[MINIMAP_SAMPLES - 1 - i], 1e-4f));
-        CHECK(nearly(pts[MINIMAP_SAMPLES + i].y,
-                     map.right_y[MINIMAP_SAMPLES - 1 - i], 1e-4f));
+        CHECK(nearly(v[2 * i].x, strip.left_x[i], 1e-4f));
+        CHECK(nearly(v[2 * i].y, strip.left_y[i], 1e-4f));
+        CHECK(nearly(v[2 * i + 1].x, strip.right_x[i], 1e-4f));
+        CHECK(nearly(v[2 * i + 1].y, strip.right_y[i], 1e-4f));
     }
-    /* Far cap: pts[23] (left, 120 m ahead) -> pts[24] (right, 120 m ahead). */
-    CHECK(pts[24].x - pts[23].x > 0.0f);
-    /* Near cap closes the loop: pts[47] -> pts[0], both 12 m behind the car. */
-    CHECK(nearly(pts[0].y, pts[MINIMAP_CONTOUR_POINTS - 1].y, 0.01f));
-    CHECK(pts[0].x < pts[MINIMAP_CONTOUR_POINTS - 1].x);
-    CHECK(nearly(pts[0].y, 217.80f, 0.01f));
+    CHECK(v[MINIMAP_VERTS - 1].y < v[1].y); /* far end is higher on the panel */
 }
 
-static void test_minimap_outline_thickness(void)
+static void test_minimap_floor_uses_the_panel_centre(void)
 {
-    car_state_t car = {0};
+    /* M5: the floor must widen toward the PANEL rect's centre, not the map
+     * rect's. The two share a centre for today's rects (416), so the bug is
+     * invisible until they differ. A hand-built strip with car_x = 416 and
+     * panel_cx = 406 makes them differ: the pair 410..411 is 4/5 px from the
+     * panel centre, so the RIGHT point is the outer one and stays put while
+     * the left moves inward to 409.5. Using the map centre instead would keep
+     * 410 and push the right point to 411.5 - the opposite choice. */
     minimap_strip_t map;
-    minimap_point_t verts[MINIMAP_OUTLINE_VERTS];
-    float min_x, max_x, min_y, max_y;
+    minimap_point_t v[MINIMAP_VERTS];
     int i;
 
-    road_reset(ROAD_SEED);
-    car.s = 50.0f;
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &map);
-    CHECK(minimap_outline(&map, MINIMAP_EDGE_THICKNESS, verts) ==
-          MINIMAP_OUTLINE_VERTS);
-    CHECK(MINIMAP_EDGE_THICKNESS == 2.0f);
-
-    /* Quad 0: first left-edge segment (pts[0] -> pts[1]), vertical. */
-    min_x = max_x = verts[0].x;
-    min_y = max_y = verts[0].y;
-    for (i = 1; i < 6; i++) {
-        if (verts[i].x < min_x) min_x = verts[i].x;
-        if (verts[i].x > max_x) max_x = verts[i].x;
-        if (verts[i].y < min_y) min_y = verts[i].y;
-        if (verts[i].y > max_y) max_y = verts[i].y;
+    memset(&map, 0, sizeof map);
+    map.count = MINIMAP_SAMPLES;
+    map.car_x = 416.0f;
+    map.panel_cx = 406.0f;
+    for (i = 0; i < MINIMAP_SAMPLES; i++) {
+        map.left_x[i] = 410.0f;
+        map.left_y[i] = 150.0f;
+        map.right_x[i] = 411.0f;
+        map.right_y[i] = 150.0f;
     }
-    CHECK(nearly(max_x - min_x, 2.0f, 0.01f));            /* thickness */
-    CHECK(nearly(min_x, 375.42f, 0.05f));                 /* centred on 376.42 */
-    CHECK(nearly(max_y - min_y, 3.7333f + 2.0f, 0.02f));  /* len + 1 px/end */
-    CHECK(nearly((min_y + max_y) * 0.5f, 215.935f, 0.01f));
-
-    /* Quad 47: near cap pts[47] -> pts[0], horizontal, 79.17 px long. */
-    min_x = max_x = verts[282].x;
-    min_y = max_y = verts[282].y;
-    for (i = 283; i < 288; i++) {
-        if (verts[i].x < min_x) min_x = verts[i].x;
-        if (verts[i].x > max_x) max_x = verts[i].x;
-        if (verts[i].y < min_y) min_y = verts[i].y;
-        if (verts[i].y > max_y) max_y = verts[i].y;
-    }
-    CHECK(nearly(max_x - min_x, 79.1667f + 2.0f, 0.02f));
-    CHECK(nearly(max_y - min_y, 2.0f, 0.01f));
-
-    for (i = 0; i < MINIMAP_OUTLINE_VERTS; i++) {
-        /*
-         * NaN-free and inside the projection clamp (358..474 / 124..226)
-         * plus half a thickness along u and n: the exact worst case is
-         * clamp -+ thickness/2 * sqrt(2) = 356.586..475.414, measured over
-         * 1547 car poses; 356/476 leaves a 0.586 px margin.
-         */
-        CHECK(verts[i].x == verts[i].x && verts[i].y == verts[i].y);
-        CHECK(verts[i].x >= 356.0f && verts[i].x <= 476.0f);
-        CHECK(verts[i].y >= 122.0f && verts[i].y <= 228.0f);
+    CHECK(minimap_ribbon(&map, v) == MINIMAP_VERTS);
+    for (i = 0; i < MINIMAP_VERTS; i += 2) {
+        CHECK(nearly(v[i].x, 409.5f, 1e-4f));
+        CHECK(nearly(v[i + 1].x, 411.0f, 1e-4f));
     }
 }
 
@@ -915,17 +1125,24 @@ static void test_minimap_grammar_width(void)
     road_config_defaults(&c);
     road_reset_config(ROAD_SEED, &c);
     car.s = 50.0f;
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &def);
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, 360.0f, 118.0f,
+                  472.0f, 224.0f, &def);
 
     c.map = ROAD_MAP_HIGHWAY;
     road_reset_config(ROAD_SEED, &c);
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &hw);
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, 360.0f, 118.0f,
+                  472.0f, 224.0f, &hw);
 
     def_w = def.right_x[0] - def.left_x[0];
     hw_w = hw.right_x[0] - hw.left_x[0];
-    CHECK(nearly(def_w, 79.1667f, 0.5f));   /* 2-lane, edge 9.5 m */
-    CHECK(nearly(hw_w, 104.1667f, 0.5f));   /* 4-lane, edge 12.5 m */
-    CHECK(nearly(hw_w - def_w, 25.0f, 0.5f));
+    /* The 0.5 px absolute tolerance is now LOOSE relative to these values:
+     * it is +/-8.4 % on the width and +/-27 % on the 1.875 px difference,
+     * because the values fell 13x with the 250 m scale. The exact constants
+     * (5.9375 / 7.8125) are pinned at 1e-4 by test_minimap_widths_at_the_new_
+     * scale; this test only has to prove the GRAMMAR widens the ribbon. */
+    CHECK(nearly(def_w, 5.9375f, 0.5f)); /* 2-lane, edge 9.5 m */
+    CHECK(nearly(hw_w, 7.8125f, 0.5f));  /* 4-lane, edge 12.5 m */
+    CHECK(nearly(hw_w - def_w, 1.875f, 0.5f));
     CHECK(hw_w > def_w);
 }
 
@@ -940,10 +1157,12 @@ static void test_minimap_variable_width(void)
     road_config_defaults(&c);
     road_reset_config(ROAD_SEED, &c);
     car.s = 50.0f;
-    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, &map);
+    minimap_build(&car, 366.0f, 132.0f, 466.0f, 218.0f, 360.0f, 118.0f,
+                  472.0f, 224.0f, &map);
     p0 = road_sample(car.s - MINIMAP_BEHIND);
     width = map.right_x[0] - map.left_x[0];
-    CHECK(nearly(width, 2.0f * p0.edge_half_width * 50.0f / 12.0f, 0.5f));
+    CHECK(nearly(width, 2.0f * p0.edge_half_width * 50.0f / MINIMAP_LATERAL,
+                 0.5f));
 }
 
 /* ---------------------------------------------------------------------- menu */
@@ -958,10 +1177,8 @@ static void test_menu_start_opens_and_closes(void)
 {
     menu_state_t m;
     racing_settings_t s;
-    menu_input_t start = {false, false, false, false, false, false, false,
-                          true};
-    menu_input_t select = {false, false, false, false, false, false, true,
-                           false};
+    menu_input_t start = {false, false, false, false, false, false, false, true, false, false};
+    menu_input_t select = {false, false, false, false, false, false, true, false, false, false};
 
     menu_reset(&m);
     settings_defaults(&s);
@@ -983,11 +1200,9 @@ static void test_menu_navigation_wraps(void)
 {
     menu_state_t m;
     racing_settings_t s;
-    menu_input_t select = {false, false, false, false, false, false, true,
-                           false};
-    menu_input_t down = {false, true, false, false, false, false, false,
-                         false};
-    menu_input_t up = {true, false, false, false, false, false, false, false};
+    menu_input_t select = {false, false, false, false, false, false, true, false, false, false};
+    menu_input_t down = {false, true, false, false, false, false, false, false, false, false};
+    menu_input_t up = {true, false, false, false, false, false, false, false, false, false};
 
     menu_reset(&m);
     settings_defaults(&s);
@@ -1003,14 +1218,10 @@ static void test_menu_sensitivity(void)
 {
     menu_state_t m;
     racing_settings_t s;
-    menu_input_t select = {false, false, false, false, false, false, true,
-                           false};
-    menu_input_t down = {false, true, false, false, false, false, false,
-                         false};
-    menu_input_t right = {false, false, false, true, false, false, false,
-                          false};
-    menu_input_t left = {false, false, true, false, false, false, false,
-                         false};
+    menu_input_t select = {false, false, false, false, false, false, true, false, false, false};
+    menu_input_t down = {false, true, false, false, false, false, false, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
+    menu_input_t left = {false, false, true, false, false, false, false, false, false, false};
     int i;
 
     menu_reset(&m);
@@ -1033,14 +1244,10 @@ static void test_menu_toggles(void)
 {
     menu_state_t m;
     racing_settings_t s;
-    menu_input_t select = {false, false, false, false, false, false, true,
-                           false};
-    menu_input_t right = {false, false, false, true, false, false, false,
-                          false};
-    menu_input_t left = {false, false, true, false, false, false, false,
-                         false};
-    menu_input_t accept = {false, false, false, false, true, false, false,
-                           false};
+    menu_input_t select = {false, false, false, false, false, false, true, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
+    menu_input_t left = {false, false, true, false, false, false, false, false, false, false};
+    menu_input_t accept = {false, false, false, false, true, false, false, false, false, false};
     int item;
 
     menu_reset(&m);
@@ -1070,14 +1277,10 @@ static void test_menu_mode_enters_calibration(void)
 {
     menu_state_t m;
     racing_settings_t s;
-    menu_input_t select = {false, false, false, false, false, false, true,
-                           false};
-    menu_input_t right = {false, false, false, true, false, false, false,
-                          false};
-    menu_input_t left = {false, false, true, false, false, false, false,
-                         false};
-    menu_input_t cancel = {false, false, false, false, false, true, false,
-                           false};
+    menu_input_t select = {false, false, false, false, false, false, true, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
+    menu_input_t left = {false, false, true, false, false, false, false, false, false, false};
+    menu_input_t cancel = {false, false, false, false, false, true, false, false, false, false};
 
     menu_reset(&m);
     settings_defaults(&s);
@@ -1098,14 +1301,10 @@ static void test_menu_calibration_capture(void)
 {
     menu_state_t m;
     racing_settings_t s;
-    menu_input_t select = {false, false, false, false, false, false, true,
-                           false};
-    menu_input_t right = {false, false, false, true, false, false, false,
-                          false};
-    menu_input_t left = {false, false, true, false, false, false, false,
-                         false};
-    menu_input_t accept = {false, false, false, false, true, false, false,
-                           false};
+    menu_input_t select = {false, false, false, false, false, false, true, false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false, false, false};
+    menu_input_t left = {false, false, true, false, false, false, false, false, false, false};
+    menu_input_t accept = {false, false, false, false, true, false, false, false, false, false};
     int i;
 
     menu_reset(&m);
@@ -1129,10 +1328,8 @@ static void test_menu_reset_peak_and_resume(void)
 {
     menu_state_t m;
     racing_settings_t s;
-    menu_input_t select = {false, false, false, false, false, false, true,
-                           false};
-    menu_input_t accept = {false, false, false, false, true, false, false,
-                           false};
+    menu_input_t select = {false, false, false, false, false, false, true, false, false, false};
+    menu_input_t accept = {false, false, false, false, true, false, false, false, false, false};
 
     menu_reset(&m);
     settings_defaults(&s);
@@ -1151,8 +1348,8 @@ static void test_menu_restart(void)
 {
     menu_state_t m;
     racing_settings_t s;
-    menu_input_t select = {false, false, false, false, false, false, true, false};
-    menu_input_t accept = {false, false, false, false, true, false, false, false};
+    menu_input_t select = {false, false, false, false, false, false, true, false, false, false};
+    menu_input_t accept = {false, false, false, false, true, false, false, false, false, false};
 
     menu_reset(&m);
     settings_defaults(&s);
@@ -1164,15 +1361,293 @@ static void test_menu_restart(void)
     CHECK(MENU_ITEM_CALIBRATE == 5);
 }
 
+/* G3: the SIGN SIZE row is appended at 8, BEFORE RESUME, so the existing
+ * indices the 030 probe walks to (CALIBRATE 5, RESTART 7) stay valid. */
+static void test_menu_sign_size_row(void)
+{
+    menu_state_t m;
+    racing_settings_t s;
+    menu_input_t in;
+
+    CHECK(MENU_ITEM_SIGN_SIZE == 8);
+    CHECK(MENU_ITEM_RESUME == 9);
+    CHECK(MENU_ITEM_CALIBRATE == 5);
+    CHECK(MENU_ITEM_RESTART == 7);
+    CHECK(MENU_ITEM_COUNT == 10);
+    CHECK(MENU_SIGN_STEP == 10);
+
+    /* menu_update() returns NONE while the menu is closed - open it first. */
+    settings_defaults(&s);
+    menu_reset(&m);
+    m.open = true;
+    m.cursor = MENU_ITEM_SIGN_SIZE;
+    memset(&in, 0, sizeof in);
+    in.right = true;
+    CHECK(menu_update(&m, &s, &in, 128, 128) == MENU_ACTION_SAVE);
+    CHECK(s.sign_scale_pct == 110);
+
+    s.sign_scale_pct = 160;
+    memset(&in, 0, sizeof in);
+    in.right = true;
+    CHECK(menu_update(&m, &s, &in, 128, 128) == MENU_ACTION_SAVE);
+    CHECK(s.sign_scale_pct == 160); /* clamped */
+
+    s.sign_scale_pct = 60;
+    memset(&in, 0, sizeof in);
+    in.left = true;
+    CHECK(menu_update(&m, &s, &in, 128, 128) == MENU_ACTION_SAVE);
+    CHECK(s.sign_scale_pct == 60);
+
+    /* The cursor still wraps over all ten rows (menu stays open). */
+    m.open = true;
+    m.cursor = MENU_ITEM_COUNT - 1;
+    memset(&in, 0, sizeof in);
+    in.down = true;
+    menu_update(&m, &s, &in, 128, 128);
+    CHECK(m.cursor == 0);
+}
+
+static void test_welcome_mode_row_appended(void)
+{
+    welcome_state_t w;
+    road_config_t c;
+    menu_input_t up = {true, false, false, false, false, false, false, false,
+                       false, false};
+    menu_input_t down = {false, true, false, false, false, false, false, false,
+                         false, false};
+    menu_input_t right = {false, false, false, true, false, false, false,
+                          false, false, false};
+
+    CHECK(WELCOME_ITEM_MODE == WELCOME_ITEM_COUNT - 1);
+    CHECK(WELCOME_ITEM_COUNT == 7);
+    welcome_reset(&w, &c);
+    CHECK(w.mode == WELCOME_MODE_TIME_ATTACK);
+    CHECK(w.page == WELCOME_PAGE_RACE);
+    CHECK(w.cursor == WELCOME_ITEM_START);
+
+    welcome_press(&w, &c, up);   CHECK(w.cursor == WELCOME_ITEM_MAP);
+    welcome_press(&w, &c, down); CHECK(w.cursor == WELCOME_ITEM_START);
+    welcome_press(&w, &c, down); CHECK(w.cursor == WELCOME_ITEM_ELEVATION);
+
+    w.cursor = WELCOME_ITEM_MODE;
+    welcome_press(&w, &c, right);
+    CHECK(w.mode == WELCOME_MODE_FREE_DRIVE);
+    welcome_press(&w, &c, right);
+    CHECK(w.mode == WELCOME_MODE_TIME_ATTACK);
+}
+
+static void test_welcome_tabs_switch_pages(void)
+{
+    welcome_state_t w;
+    road_config_t c;
+    hiscore_book_t book;
+    menu_input_t rtrig = {false, false, false, false, false, false, false, false,
+                          false, true};
+    menu_input_t ltrig = {false, false, false, false, false, false, false, false,
+                          true, false};
+
+    hiscore_clear(&book);
+    welcome_reset(&w, &c);
+    c.map = ROAD_MAP_HIGHWAY;
+    CHECK(welcome_update(&w, &c, &book, &rtrig) == WELCOME_ACTION_NONE);
+    CHECK(w.page == WELCOME_PAGE_LEADERBOARD);
+    CHECK(w.lb_map == ROAD_MAP_HIGHWAY);
+    CHECK(w.lb_cursor == 0 && w.lb_first == 0);
+    CHECK(welcome_update(&w, &c, &book, &ltrig) == WELCOME_ACTION_NONE);
+    CHECK(w.page == WELCOME_PAGE_RACE);
+    CHECK(w.cursor == WELCOME_ITEM_START);
+}
+
+static void test_welcome_page_switch_consumes_input(void)
+{
+    welcome_state_t w;
+    road_config_t c;
+    hiscore_book_t book;
+    menu_input_t both = {false, false, true, false, false, false, false, false,
+                         true, false};
+
+    hiscore_clear(&book);
+    welcome_reset(&w, &c);
+    w.cursor = WELCOME_ITEM_ELEVATION;
+    w.page = WELCOME_PAGE_LEADERBOARD;
+    CHECK(welcome_update(&w, &c, &book, &both) == WELCOME_ACTION_NONE);
+    CHECK(w.page == WELCOME_PAGE_RACE);
+    CHECK(w.cursor == WELCOME_ITEM_ELEVATION);
+    CHECK(nearly(c.elevation_pct, 100.0f, 1e-4f));
+}
+
+static void test_welcome_leaderboard_scroll_and_accept(void)
+{
+    welcome_state_t w;
+    road_config_t c;
+    hiscore_book_t book;
+    menu_input_t down = {false, true, false, false, false, false, false, false,
+                         false, false};
+    menu_input_t accept = {false, false, false, false, true, false, false,
+                           false, false, false};
+    menu_input_t right = {false, false, false, true, false, false, false, false,
+                          false, false};
+    int i;
+
+    hiscore_clear(&book);
+    book.table[ROAD_MAP_DEFAULT].count = 10;
+    welcome_reset(&w, &c);
+    w.page = WELCOME_PAGE_LEADERBOARD;
+    for (i = 0; i < 8; i++)
+        welcome_press_book(&w, &c, &book, down);
+    CHECK(w.lb_cursor == 8 && w.lb_first == 1);
+    for (i = 0; i < 4; i++)
+        welcome_press_book(&w, &c, &book, down);
+    CHECK(w.lb_cursor == 9 && w.lb_first == 2);
+    welcome_press_book(&w, &c, &book, right);
+    CHECK(w.lb_map == ROAD_MAP_UPHILL);
+    CHECK(w.lb_cursor == 0 && w.lb_first == 0);
+    CHECK(welcome_press_book(&w, &c, &book, accept) == WELCOME_ACTION_NONE);
+}
+
+static void test_welcome_leaderboard_short_table(void)
+{
+    welcome_state_t w;
+    road_config_t c;
+    hiscore_book_t book;
+    menu_input_t down = {false, true, false, false, false, false, false, false,
+                         false, false};
+    int i;
+
+    hiscore_clear(&book);
+    book.table[ROAD_MAP_DEFAULT].count = 3;
+    welcome_reset(&w, &c);
+    w.page = WELCOME_PAGE_LEADERBOARD;
+    for (i = 0; i < 5; i++)
+        welcome_press_book(&w, &c, &book, down);
+    CHECK(w.lb_cursor == 2);
+    CHECK(w.lb_first == 0);
+
+    book.table[ROAD_MAP_DEFAULT].count = 0;
+    welcome_press_book(&w, &c, &book, down);
+    CHECK(w.lb_cursor == 0 && w.lb_first == 0);
+}
+
+static void test_input_gate_zeros_analog_steer(void)
+{
+    input_shaper_t shaper;
+    racing_raw_input_t raw;
+    racing_settings_t s;
+    float steer;
+
+    settings_defaults(&s);
+    s.steer_mode = RACING_STEER_ANALOG;
+    s.analog_centre = 128;
+    s.analog_deadzone = 32;
+    input_reset(&shaper);
+
+    raw.left = true;
+    raw.right = true;
+    raw.brake = true;
+    raw.nub_lx = 240; /* full lock to the right */
+    steer = input_step(&shaper, &raw, &s, 1.0f / 60.0f);
+    CHECK(steer > 0.5f);
+
+    /* Controls dead (clock finished): every steering/brake source is zeroed. */
+    input_gate_raw(&raw, false, s.analog_centre);
+    CHECK(raw.nub_lx == s.analog_centre);
+    CHECK(!raw.left && !raw.right && !raw.brake);
+    input_reset(&shaper);
+    steer = input_step(&shaper, &raw, &s, 1.0f / 60.0f);
+    CHECK(nearly(steer, 0.0f, 1e-6f));
+
+    /* Controls alive: the raw values survive untouched. */
+    raw.left = true;
+    raw.brake = true;
+    raw.nub_lx = 200;
+    input_gate_raw(&raw, true, s.analog_centre);
+    CHECK(raw.left && !raw.right && raw.brake);
+    CHECK(raw.nub_lx == 200);
+}
+
+static void test_welcome_page_next_consumes_input(void)
+{
+    welcome_state_t w;
+    road_config_t c;
+    hiscore_book_t book;
+    menu_input_t both = {false, false, false, false, false, false, false, false,
+                         false, true}; /* page_next */
+
+    both.left = true; /* and a slider nudge in the same frame */
+    hiscore_clear(&book);
+    welcome_reset(&w, &c);
+    w.cursor = WELCOME_ITEM_ELEVATION;
+    CHECK(welcome_update(&w, &c, &book, &both) == WELCOME_ACTION_NONE);
+    CHECK(w.page == WELCOME_PAGE_LEADERBOARD);
+    CHECK(nearly(c.elevation_pct, 100.0f, 1e-4f));
+    CHECK(w.cursor == WELCOME_ITEM_ELEVATION);
+    /* the same frame's Left must not also move the leaderboard map selector */
+    CHECK(w.lb_map == ROAD_MAP_DEFAULT);
+}
+
+static void test_welcome_mode_left_cycles(void)
+{
+    welcome_state_t w;
+    road_config_t c;
+    menu_input_t left = {false, false, true, false, false, false, false, false,
+                         false, false};
+
+    welcome_reset(&w, &c);
+    CHECK(w.mode == WELCOME_MODE_TIME_ATTACK);
+    w.cursor = WELCOME_ITEM_MODE;
+    welcome_press(&w, &c, left);
+    CHECK(w.mode == WELCOME_MODE_FREE_DRIVE);
+    welcome_press(&w, &c, left);
+    CHECK(w.mode == WELCOME_MODE_TIME_ATTACK);
+}
+
+static void test_welcome_leaderboard_scroll_clamps(void)
+{
+    welcome_state_t w;
+    road_config_t c;
+    hiscore_book_t book;
+    menu_input_t down = {false, true, false, false, false, false, false, false,
+                         false, false};
+    menu_input_t up = {true, false, false, false, false, false, false, false,
+                       false, false};
+    int i;
+
+    hiscore_clear(&book);
+    book.table[ROAD_MAP_DEFAULT].count = 10;
+    welcome_reset(&w, &c);
+    w.page = WELCOME_PAGE_LEADERBOARD;
+    for (i = 0; i < 9; i++)
+        welcome_press_book(&w, &c, &book, down);
+    CHECK(w.lb_cursor == 9 && w.lb_first == 2);
+    for (i = 0; i < 9; i++)
+        welcome_press_book(&w, &c, &book, up);
+    CHECK(w.lb_cursor == 0 && w.lb_first == 0); /* clamps back to the top */
+    welcome_press_book(&w, &c, &book, up);      /* no wrap below 0 */
+    CHECK(w.lb_cursor == 0 && w.lb_first == 0);
+
+    /* A stale window start (e.g. after the table shrank) is clamped back so
+     * the visible window can never start past count - WELCOME_LB_VISIBLE. */
+    w.lb_cursor = 9;
+    w.lb_first = 5;
+    welcome_press_book(&w, &c, &book, down);
+    CHECK(w.lb_cursor == 9);
+    CHECK(w.lb_first == 2);
+}
+
 int main(void)
 {
     test_settings_defaults();
+    test_settings_defaults_v2();
     test_settings_crc16_vector();
     test_settings_round_trip();
     test_settings_rejects_corruption();
     test_settings_rejects_unknown_flags();
     test_settings_validate_clamps();
-    test_settings_file_is_unchanged();
+    test_settings_file_is_v2_and_16_bytes();
+    test_settings_v2_round_trip();
+    test_settings_v1_still_loads();
+    test_settings_v2_rejects_bad_scale();
+    test_settings_serialize_clamps_sign_scale();
 
     test_welcome_defaults_and_navigation();
     test_welcome_sliders_adjust();
@@ -1182,6 +1657,15 @@ int main(void)
     test_welcome_map_restart();
     test_welcome_highway_disabled_sliders();
     test_welcome_uphill_width_slider();
+    test_welcome_mode_row_appended();
+    test_welcome_tabs_switch_pages();
+    test_welcome_page_switch_consumes_input();
+    test_welcome_leaderboard_scroll_and_accept();
+    test_welcome_leaderboard_short_table();
+    test_input_gate_zeros_analog_steer();
+    test_welcome_page_next_consumes_input();
+    test_welcome_mode_left_cycles();
+    test_welcome_leaderboard_scroll_clamps();
 
     test_analog_mapping_calibrated();
     test_dpad_mode_ignores_nub();
@@ -1207,9 +1691,13 @@ int main(void)
     test_minimap_projection();
     test_minimap_lateral_shift();
     test_minimap_variable_width();
-    test_minimap_outline_counts();
-    test_minimap_outline_closed();
-    test_minimap_outline_thickness();
+    test_minimap_ribbon_counts();
+    test_minimap_widths_at_the_new_scale();
+    test_minimap_isotropic();
+    test_minimap_min_width_documented_poses();
+    test_minimap_min_width_u_turn();
+    test_minimap_ribbon_order();
+    test_minimap_floor_uses_the_panel_centre();
     test_minimap_grammar_width();
 
     test_menu_start_opens_and_closes();
@@ -1220,6 +1708,7 @@ int main(void)
     test_menu_calibration_capture();
     test_menu_reset_peak_and_resume();
     test_menu_restart();
+    test_menu_sign_size_row();
 
     if (failures) {
         fprintf(stderr, "%d test(s) failed\n", failures);

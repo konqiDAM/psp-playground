@@ -9,42 +9,6 @@
 
 #include <math.h>
 
-static float clamp01(float u)
-{
-    if (u < 0.0f)
-        return 0.0f;
-    if (u > 1.0f)
-        return 1.0f;
-    return u;
-}
-
-/* 3u^2 - 2u^3: smooth, monotone, zero slope at both ends. */
-static float smoothstep01(float u)
-{
-    u = clamp01(u);
-    return u * u * (3.0f - 2.0f * u);
-}
-
-float guardrail_envelope(float s, float s0, float s1)
-{
-    if (s1 <= s0)
-        return 0.0f;
-    return smoothstep01((s - s0) / GUARDRAIL_RISE) *
-           smoothstep01((s1 - s) / GUARDRAIL_SINK);
-}
-
-float guardrail_beam_top(float s, float s0, float s1)
-{
-    return -GUARDRAIL_END_DEPTH +
-           (GUARDRAIL_HEIGHT + GUARDRAIL_END_DEPTH) *
-               guardrail_envelope(s, s0, s1);
-}
-
-float guardrail_beam_bottom(float s, float s0, float s1)
-{
-    return guardrail_beam_top(s, s0, s1) - GUARDRAIL_BEAM_DEPTH;
-}
-
 int guardrail_band_count(float s0, float s1)
 {
     float len = s1 - s0;
@@ -54,9 +18,48 @@ int guardrail_band_count(float s0, float s1)
     return (int)ceilf(len / GUARDRAIL_ROW_STEP);
 }
 
-bool guardrail_post_ok(float s, float s0, float s1)
+void guardrail_band_range(const guardrail_span_ref_t *span, float *from,
+                          float *to)
 {
-    return guardrail_beam_top(s, s0, s1) >= GUARDRAIL_POST_MIN_TOP;
+    float a;
+    float b;
+
+    if (!span)
+        return;
+    a = span->v0;
+    b = span->v1;
+    if (a < span->s0)
+        a = span->s0;
+    if (b > span->s1)
+        b = span->s1;
+    if (b < a)
+        b = a;
+    if (from)
+        *from = a;
+    if (to)
+        *to = b;
+}
+
+bool guardrail_span_continues(const guardrail_span_ref_t *prev,
+                              const guardrail_span_ref_t *cur)
+{
+    if (!prev || !cur)
+        return false;
+    return prev->s0 == cur->s0 && prev->s1 == cur->s1 &&
+           prev->side == cur->side;
+}
+
+/* The beam plane is the asphalt edge (the white line) and the post is 0.02 m
+ * outboard of it: Part D's whole point is that the rail sits on the asphalt,
+ * not out on the shoulder edge. */
+float guardrail_rail_lateral(float half_width)
+{
+    return half_width;
+}
+
+float guardrail_post_lateral(float half_width)
+{
+    return half_width + GUARDRAIL_POST_OFFSET;
 }
 
 float guardrail_post_s(float s0, float s1, int index)
@@ -118,15 +121,17 @@ int guardrail_select_spans(const guardrail_span_ref_t *spans, int count,
     if (limit < 0)
         limit = 0;
 
-    /* Stable insertion sort by s0 ascending (nearest first) over the spans
-     * that can actually be seen: one ending at or behind the eye is never on
-     * screen, and letting it win the ranking would spend the budget on
-     * invisible geometry while the visible span goes undrawn. */
+    /* Stable insertion sort by v0 ascending (nearest first) over the spans
+     * that can actually be seen: one whose visible interval ends at or behind
+     * the eye is never on screen, and letting it win the ranking would spend
+     * the budget on invisible geometry while the visible span goes undrawn.
+     * The cost stays on the GRAMMAR span: the drawn band range is a sub-range
+     * of it, so the budget over-counts rather than truncating the geometry. */
     for (i = 0; i < count; i++) {
-        if (spans[i].s1 <= eye_s)
+        if (spans[i].v1 <= eye_s)
             continue;
         j = ranked - 1;
-        while (j >= 0 && spans[order[j]].s0 > spans[i].s0) {
+        while (j >= 0 && spans[order[j]].v0 > spans[i].v0) {
             order[j + 1] = order[j];
             j--;
         }
@@ -136,8 +141,16 @@ int guardrail_select_spans(const guardrail_span_ref_t *spans, int count,
 
     for (i = 0; i < ranked; i++) {
         int idx = order[i];
-        int cost = guardrail_span_vertex_cost(spans[idx].s0, spans[idx].s1);
+        /* Bands are per RUN, posts per GRAMMAR SPAN: a split emits several
+         * runs of one span and charging the posts on each would count the
+         * same posts twice and shrink the budget for no geometry. */
+        int cost = guardrail_band_count(spans[idx].v0, spans[idx].v1) *
+                   GUARDRAIL_VERTS_PER_BAND;
 
+        if (i == 0 || !guardrail_span_continues(&spans[order[i - 1]],
+                                                &spans[idx]))
+            cost += guardrail_post_count(spans[idx].s0, spans[idx].s1) *
+                    GUARDRAIL_VERTS_PER_POST;
         if (used + cost > limit)
             break; /* whole-span truncation from the far end */
         keep[idx] = 1;

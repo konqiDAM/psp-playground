@@ -14,6 +14,7 @@
 
 #define MENU_SENS_STEP 0.1f
 #define MENU_DEADZONE_STEP 8
+#define MENU_SIGN_STEP 10 /* percent per Left/Right press */
 
 typedef enum {
     MENU_SCREEN_MAIN = 0,
@@ -29,6 +30,9 @@ typedef enum {
     MENU_ITEM_CALIBRATE,
     MENU_ITEM_RESET_PEAK,
     MENU_ITEM_RESTART,
+    /* Appended at 8, before RESUME: MENU_ITEM_CALIBRATE stays 5 and
+     * MENU_ITEM_RESTART stays 7, which check-racing-030.py walks to. */
+    MENU_ITEM_SIGN_SIZE,
     MENU_ITEM_RESUME,
     MENU_ITEM_COUNT
 } menu_item_t;
@@ -44,6 +48,7 @@ typedef enum {
 
 typedef struct {
     bool up, down, left, right, accept, cancel, menu, start; /* edges */
+    bool page_prev, page_next; /* shoulder edges: welcome page tabs */
 } menu_input_t;
 
 typedef struct {
